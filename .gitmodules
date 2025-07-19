@@ -1,0 +1,6 @@
+[submodule "thirdparty/megatron-lm"]
+	path = thirdparty/megatron-lm
+	url = https://github.com/jeromeku/megatron-lm
+[submodule "thirdparty/mbridge"]
+	path = thirdparty/mbridge
+	url = https://github.com/jeromeku/mbridge
