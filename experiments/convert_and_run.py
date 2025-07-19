@@ -2,11 +2,10 @@ import argparse
 import os
 
 import torch
+from mbridge import AutoBridge
 from megatron.core import parallel_state as mpu
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from transformers import AutoTokenizer
-
-from mbridge import AutoBridge
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3MoeForCausalLM
 
 
 def init_distributed():
@@ -33,7 +32,7 @@ def load_model(hf_model_path):
     return model
 
 
-def generate_sequence(prompt, model, hf_model_path, max_new_tokens=100):
+def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausalLM, max_new_tokens=1):
     """Generate text sequence"""
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
 
@@ -62,33 +61,47 @@ def generate_sequence(prompt, model, hf_model_path, max_new_tokens=100):
             output = model[0].module(
                 cur_input_ids, cur_position_ids, cur_attention_mask
             )
+            ref_output = ref_model.forward(cur_input_ids)
+        logits: torch.Tensor = output[0].float()
+        ref_logits: torch.Tensor = ref_output.logits[0].float()
 
-        # Get the next token
-        next_token = output.argmax(dim=-1)[:, -1]
-        generated_tokens.append(next_token.item())
+        _, topk_ids = logits.topk(5, dim=-1)
+        _, ref_topk_ids = ref_logits.topk(5, dim=-1)
+        
+        print("Topk token ids:")
 
-        # Stop if EOS token is generated
-        if next_token.item() == tokenizer.eos_token_id:
-            break
+        for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):            
+            if set(test) != set(ref):
+                print(f"Topk ids mismatch: {i}: {test.tolist()} {ref.tolist()}")
 
-        # Update input sequence
-        cur_input_ids = torch.cat([cur_input_ids, next_token.unsqueeze(0)], dim=1)
-        cur_position_ids = torch.arange(
-            cur_input_ids.shape[1], device=cur_input_ids.device
-        ).unsqueeze(0)
-        cur_attention_mask = torch.ones_like(cur_input_ids)
+        diff = (logits - ref_logits).abs().max()
+        print(f"logits diff: {diff.item():.4f}")
+        # # Get the next token
+        # next_token = output.argmax(dim=-1)[:, -1]
+        # generated_tokens.append(next_token.item())
 
-    # Decode the generated token sequence
-    generated_text = tokenizer.decode(generated_tokens)
-    print(f"Generated text:\n{generated_text}")
-    return generated_text
+        # # Stop if EOS token is generated
+        # if next_token.item() == tokenizer.eos_token_id:
+        #     break
+
+        # # Update input sequence
+        # cur_input_ids = torch.cat([cur_input_ids, next_token.unsqueeze(0)], dim=1)
+        # cur_position_ids = torch.arange(
+        #     cur_input_ids.shape[1], device=cur_input_ids.device
+        # ).unsqueeze(0)
+        # cur_attention_mask = torch.ones_like(cur_input_ids)
+
+    # # Decode the generated token sequence
+    # generated_text = tokenizer.decode(generated_tokens)
+    # print(f"Generated text:\n{generated_text}")
+    # return generated_text
 
 
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Load model and generate text")
     parser.add_argument(
-        "--model_path", type=str, required=True, help="HuggingFace model path"
+        "model_path", type=str, help="HuggingFace model path"
     )
     parser.add_argument(
         "--max_tokens",
@@ -103,11 +116,14 @@ def main():
 
     # Load model
     model = load_model(args.model_path)
+    dtype = next(model[0].parameters()).dtype
+    hf_model: Qwen3MoeForCausalLM = AutoModelForCausalLM.from_pretrained(args.model_path, device_map=0, torch_dtype=dtype)
+    assert next(hf_model.parameters()).dtype == dtype
     print(f"Model loaded: {args.model_path}")
-
+    print(f"hf_model loaded: {hf_model.device}")
     # Generate text
     prompt = "A quick sort in python for me is \n```python\n"
-    generate_sequence(prompt, model, args.model_path, args.max_tokens)
+    generate_sequence(prompt, model, args.model_path, ref_model=hf_model)
 
 
 if __name__ == "__main__":

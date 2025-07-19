@@ -26,7 +26,7 @@
   "router_aux_loss_coef": 0.001,
   "sliding_window": null,
   "tie_word_embeddings": false,
-  "torch_dtype": "float32",
+  "torch_dtype": "bfloat16",
   "transformers_version": "4.53.2",
   "use_cache": true,
   "use_sliding_window": false,
