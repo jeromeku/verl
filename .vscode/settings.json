@@ -11,5 +11,9 @@
         "initializer_list": "cpp",
         "utility": "cpp"
     },
-    "iis.configDir": ""
+    "iis.configDir": "",
+    "python.analysis.extraPaths": [
+        "/home/jeromeku/verl/thirdparty/mbridge",
+        "/home/jeromeku/verl/thirdparty/megatron-lm"
+    ]
 }

@@ -4,3 +4,6 @@
 [submodule "thirdparty/mbridge"]
 	path = thirdparty/mbridge
 	url = https://github.com/jeromeku/mbridge
+[submodule "experiments/thirdparty/transformerengine"]
+	path = thirdparty/transformerengine
+	url = https://github.com/jeromeku/transformerengine
