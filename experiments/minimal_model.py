@@ -5,6 +5,7 @@ import os
 
 import torch
 from megatron.core import parallel_state as mpu
+from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from transformers import AutoConfig
 
 from verl.models.mcore import (  # step 3‑4 :contentReference[oaicite:0]{index=0}
@@ -39,20 +40,21 @@ def main():
         tensor_model_parallel_size    = args.tp,
         pipeline_model_parallel_size  = args.pp,
     )
+    model_parallel_cuda_manual_seed(0)
 
     # ------------------------------------------------------------------ 3
     hf_cfg = AutoConfig.from_pretrained(args.hf_path, trust_remote_code=True)
     tf_cfg = hf_to_mcore_config(hf_cfg, dtype=torch_dtype)            # HF → mcore TransformerConfig
     print(tf_cfg)
-    if False:
+    if True:
         # ------------------------------------------------------------------ 4
         print(f"[rank{rank}] building empty GPT‑MoE…")
         model = init_mcore_model(
             tf_cfg, hf_cfg,
-            pre_process=True,  post_process=True,
-            share_embeddings_and_output_weights=True,
-        ).to(torch_dtype).cuda()
-
+        )
+        print(f"{type(model)}")
+        print(model)
+    if False:
         # ------------------------------------------------------------------ 5
         if torch.distributed.get_rank() == 0:
             print(">>> streaming distributed ckpt shards from", args.ckpt_dir)
