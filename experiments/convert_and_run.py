@@ -43,10 +43,10 @@ def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausa
     )
     attention_mask = torch.ones_like(input_ids).to(input_ids.device)
 
-    generated_tokens = []
     cur_input_ids = input_ids
     cur_position_ids = position_ids
     cur_attention_mask = attention_mask
+
     from tqdm import trange
 
     for _ in trange(max_new_tokens):
@@ -65,49 +65,26 @@ def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausa
         logits: torch.Tensor = output[0].float()
         ref_logits: torch.Tensor = ref_output.logits[0].float()
 
-        _, topk_ids = logits.topk(5, dim=-1)
-        _, ref_topk_ids = ref_logits.topk(5, dim=-1)
+        _, topk_ids = logits.topk(3, dim=-1)
+        _, ref_topk_ids = ref_logits.topk(3, dim=-1)
         
         print("Topk token ids:")
 
         for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):            
+            test = test.tolist()
+            ref = ref.tolist()
             if set(test) != set(ref):
-                print(f"Topk ids mismatch: {i}: {test.tolist()} {ref.tolist()}")
+                print(f"Topk ids mismatch: {i}: {test} != {ref}")
 
         diff = (logits - ref_logits).abs().max()
         print(f"logits diff: {diff.item():.4f}")
-        # # Get the next token
-        # next_token = output.argmax(dim=-1)[:, -1]
-        # generated_tokens.append(next_token.item())
-
-        # # Stop if EOS token is generated
-        # if next_token.item() == tokenizer.eos_token_id:
-        #     break
-
-        # # Update input sequence
-        # cur_input_ids = torch.cat([cur_input_ids, next_token.unsqueeze(0)], dim=1)
-        # cur_position_ids = torch.arange(
-        #     cur_input_ids.shape[1], device=cur_input_ids.device
-        # ).unsqueeze(0)
-        # cur_attention_mask = torch.ones_like(cur_input_ids)
-
-    # # Decode the generated token sequence
-    # generated_text = tokenizer.decode(generated_tokens)
-    # print(f"Generated text:\n{generated_text}")
-    # return generated_text
 
 
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Load model and generate text")
     parser.add_argument(
-        "model_path", type=str, help="HuggingFace model path"
-    )
-    parser.add_argument(
-        "--max_tokens",
-        type=int,
-        default=100,
-        help="Maximum number of tokens to generate",
+        "--model_path", type=str, default="Qwen/Qwen3-0.6B", help="HuggingFace model path"
     )
     args = parser.parse_args()
 
@@ -117,7 +94,7 @@ def main():
     # Load model
     model = load_model(args.model_path)
     dtype = next(model[0].parameters()).dtype
-    hf_model: Qwen3MoeForCausalLM = AutoModelForCausalLM.from_pretrained(args.model_path, device_map=0, torch_dtype=dtype)
+    hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map=0, torch_dtype=dtype)
     assert next(hf_model.parameters()).dtype == dtype
     print(f"Model loaded: {args.model_path}")
     print(f"hf_model loaded: {hf_model.device}")
