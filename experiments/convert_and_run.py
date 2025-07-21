@@ -115,6 +115,7 @@ def main():
     from megatron.core.models.gpt.gpt_model import GPTModel
     from megatron.core.transformer import TransformerConfig
     from megatron.core.transformer.module import Float16Module
+    from megatron.core.transformer.moe.moe_layer import MoELayer
     from megatron.core.transformer.transformer_block import TransformerBlock
     from megatron.core.transformer.transformer_layer import (
         TransformerLayer,
@@ -122,7 +123,6 @@ def main():
     )
     from transformers.configuration_utils import PretrainedConfig
     from transformers.models.qwen3_moe import Qwen3MoeConfig
-
     hf_model_path = args.model_path
     tracer = nullcontext()
     with tracer:
@@ -144,7 +144,7 @@ def main():
         pre_process = mpu.is_pipeline_first_stage()
         post_process = mpu.is_pipeline_last_stage()
         
-        with torch.device("meta"):
+        with torch.device("cuda"):
             gpt_model: GPTModel = GPTModel(
                     config=tf_config,
                     transformer_layer_spec=transformer_spec,
@@ -163,10 +163,19 @@ def main():
         print("Float16 wrapped model:")
         print(model)
         #model = bridge.get_model()
-        for name, param in model.named_parameters():
-            print(f"{name}: {param.shape=} {param.dtype=}")
-        for name, buf in model.named_buffers():
-            print(f"{name}: {buf.shape} {buf.dtype}")    
+        # for name, param in model.named_parameters():
+        #     print(f"{name}: {param.shape=} {param.dtype=}")
+        # for name, buf in model.named_buffers():
+        #     print(f"{name}: {buf.shape} {buf.dtype}")    
+    base_model: GPTModel = model.module
+    block: TransformerBlock = base_model.decoder
+    layer: TransformerLayer = block.layers[0]
+    mlp: MoELayer = layer.mlp
+
+    print(f"{type(layer)}")
+    print(layer)
+    hidden_states = torch.randn(1, 1024, hf_config.hidden_size, dtype=torch.bfloat16, device="cuda")
+    out = mlp.forward(hidden_states) 
     tracer.output_file = "traces/load_weights.json"
     
     # with tracer:
