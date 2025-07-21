@@ -1,5 +1,6 @@
 import argparse
 import os
+from pathlib import Path
 
 import torch
 from mbridge import AutoBridge
@@ -7,6 +8,15 @@ from megatron.core import parallel_state as mpu
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3MoeForCausalLM
 
+
+def configure_tracer():
+    import mbridge
+    import megatron.core as mcore
+    from viztracer import VizTracer
+    MBRIDGE_ROOT = Path(mbridge.__file__).parent
+    MCORE_ROOT = Path(mcore.__file__).parent
+    tracer = VizTracer(include_files=[MBRIDGE_ROOT.resolve().as_posix(), MCORE_ROOT.resolve().as_posix()], log_func_args=True, log_func_retval=True)
+    return tracer
 
 def init_distributed():
     """Initialize distributed environment"""
@@ -28,7 +38,9 @@ def load_model(hf_model_path):
     """Load model"""
     bridge = AutoBridge.from_pretrained(hf_model_path)
     model = bridge.get_model()
+    
     bridge.load_weights(model, hf_model_path)
+    
     return model
 
 
@@ -92,7 +104,75 @@ def main():
     init_distributed()
 
     # Load model
-    model = load_model(args.model_path)
+    tracer = configure_tracer()
+    tracer.output_file = "traces/create_model.json"
+    from contextlib import nullcontext
+    from dataclasses import asdict
+    from pprint import pp
+
+    from mbridge.core import Bridge, LLMBridge
+    from megatron.core import parallel_state as mpu
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.transformer import TransformerConfig
+    from megatron.core.transformer.module import Float16Module
+    from megatron.core.transformer.transformer_block import TransformerBlock
+    from megatron.core.transformer.transformer_layer import (
+        TransformerLayer,
+        TransformerLayerSubmodules,
+    )
+    from transformers.configuration_utils import PretrainedConfig
+    from transformers.models.qwen3_moe import Qwen3MoeConfig
+
+    hf_model_path = args.model_path
+    tracer = nullcontext()
+    with tracer:
+
+        bridge: LLMBridge = AutoBridge.from_pretrained(hf_model_path)
+        tf_config: TransformerConfig = bridge.config
+        hf_config: Qwen3MoeConfig = bridge.hf_config
+        
+        print(f"HF Config")
+        pp(hf_config.to_dict())
+        print("TransformerConfig")
+        pp(asdict(tf_config))
+        transformer_spec: TransformerLayerSubmodules = bridge._get_transformer_layer_spec()
+        print("Transformer Layer Spec")
+        pp(asdict(transformer_spec))
+        
+        gpt_args: dict = bridge._get_gptmodel_args()
+        
+        pre_process = mpu.is_pipeline_first_stage()
+        post_process = mpu.is_pipeline_last_stage()
+        
+        with torch.device("meta"):
+            gpt_model: GPTModel = GPTModel(
+                    config=tf_config,
+                    transformer_layer_spec=transformer_spec,
+                    pre_process=pre_process,
+                    post_process=post_process,
+                    share_embeddings_and_output_weights=hf_config.tie_word_embeddings,
+                    **gpt_args,
+                )  
+        
+        print("GPTModel")
+        print(gpt_model)   
+        decoder: TransformerBlock = gpt_model.decoder     
+        print("Decoder")
+        print(decoder)
+        model: Float16Module = Float16Module(tf_config, gpt_model)
+        print("Float16 wrapped model:")
+        print(model)
+        #model = bridge.get_model()
+        for name, param in model.named_parameters():
+            print(f"{name}: {param.shape=} {param.dtype=}")
+        for name, buf in model.named_buffers():
+            print(f"{name}: {buf.shape} {buf.dtype}")    
+    tracer.output_file = "traces/load_weights.json"
+    
+    # with tracer:
+    #     bridge.load_weights(model, args.model_path)
+    
+    return    
     dtype = next(model[0].parameters()).dtype
     hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map=0, torch_dtype=dtype)
     assert next(hf_model.parameters()).dtype == dtype
