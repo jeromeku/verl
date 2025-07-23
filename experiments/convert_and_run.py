@@ -112,6 +112,7 @@ def main():
 
     from mbridge.core import Bridge, LLMBridge
     from megatron.core import parallel_state as mpu
+    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
     from megatron.core.models.gpt.gpt_model import GPTModel
     from megatron.core.transformer import TransformerConfig
     from megatron.core.transformer.module import Float16Module
@@ -123,6 +124,7 @@ def main():
     )
     from transformers.configuration_utils import PretrainedConfig
     from transformers.models.qwen3_moe import Qwen3MoeConfig
+
     hf_model_path = args.model_path
     tracer = nullcontext()
     with tracer:
@@ -135,7 +137,8 @@ def main():
         pp(hf_config.to_dict())
         print("TransformerConfig")
         pp(asdict(tf_config))
-        transformer_spec: TransformerLayerSubmodules = bridge._get_transformer_layer_spec()
+        transformer_spec = get_gpt_decoder_block_spec(tf_config, use_transformer_engine=True)
+       # transformer_spec: TransformerLayerSubmodules = bridge._get_transformer_layer_spec()
         print("Transformer Layer Spec")
         pp(asdict(transformer_spec))
         
