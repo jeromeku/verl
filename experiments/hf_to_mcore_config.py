@@ -5,6 +5,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from pprint import pp
+from contextlib import ExitStack, nullcontext
 from argparse import Namespace
 import dataclasses
 import megatron.core as mc
@@ -44,6 +45,55 @@ except ImportError:
 QWEN3_30B_3B = "Qwen/Qwen3-30B-A3B"
 QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
 
+from contextlib import contextmanager
+from unittest.mock import patch
+import torch
+
+
+@contextmanager
+def meta_device_context():
+    """
+    Force every `torch.cuda.device(...)` or `torch.cuda.current_device()` call
+    inside the `with`‑block to point at the *meta* backend instead of a real
+    GPU.
+
+    Examples
+    --------
+    >>> with init_on_meta():
+    ...     model = model_provider_func(pre_process=True, post_process=True)
+    >>> next(model.parameters()).device
+    device(type='meta')
+    """
+
+    @contextmanager
+    def _meta_device_ctx(*_args, **_kw):
+        # Anything created in here inherits the default device = 'meta'
+        with torch.device("meta"):
+            yield
+
+    import transformer_engine.pytorch.module.base as te_base
+
+    def _noop_reset(*args, **kwargs):
+        return
+
+    patches = [
+        patch("torch.cuda.device", _meta_device_ctx),
+        patch("torch.cuda.current_device", lambda: torch.device("meta")),
+    ]
+
+    patches.append(patch.object(te_base, "reset_parameters", _noop_reset, create=True))
+    patches.append(
+        patch.object(
+            getattr(te_base, "TransformerEngineBaseModule"), "reset_parameters", _noop_reset
+        )
+    )
+
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        with torch.device("meta"):
+            yield
+
 
 def init_distributed(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
     torch.distributed.init_process_group("nccl")
@@ -72,8 +122,6 @@ def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
         # Incurs overhead, should only be set if seqlen varies by microbatch within a global batch.
         "variable_seq_lengths": variable_seq_lengths,
     }
-
-
 
 
 def get_moe_config(hf_config: Qwen3MoeConfig):
@@ -205,32 +253,15 @@ def get_transformer_spec(
     return transformer_layer_spec
 
 
-# From pretrain_gpt
-def _get_gpt_model(
-    config: TransformerConfig,
+def get_model_provider_func(
+    config: TransformerConfig, args: Namespace, parallel_output: bool = True
 ):
-    model = GPTModel(
-        config=config,
-        transformer_layer_spec=transformer_layer_spec,
-        vocab_size=args.padded_vocab_size,
-        max_sequence_length=args.max_position_embeddings,
-        pre_process=pre_process,
-        post_process=post_process,
-        fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
-        parallel_output=True,
-        share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
-        position_embedding_type=args.position_embedding_type,
-        rotary_percent=args.rotary_percent,
-        rotary_base=args.rotary_base,
-        rope_scaling=args.use_rope_scaling,
-        mtp_block_spec=mtp_block_spec,
-        vp_stage=vp_stage,
-    )
+    use_transformer_engine = args.transformer_impl == "transformer_engine"
 
-
-def model_provider(config: TransformerConfig, args: Namespace, use_transformer_engine: bool = True, parallel_output: bool = True):
-    def model_provider_func(pre_process: bool, post_process: bool, vp_stage:int = None):
-        transformer_layer_spec = get_transformer_spec(config, use_transformer_engine=use_transformer_engine, vp_stage=vp_stage)
+    def model_provider_func(pre_process: bool, post_process: bool, vp_stage: int = None):
+        transformer_layer_spec = get_transformer_spec(
+            config, use_transformer_engine=use_transformer_engine, vp_stage=vp_stage
+        )
 
         model = GPTModel(
             config=config,
@@ -249,7 +280,9 @@ def model_provider(config: TransformerConfig, args: Namespace, use_transformer_e
         )
 
         return model
+
     return model_provider_func
+
 
 def get_model(
     model_provider_func,
@@ -281,8 +314,9 @@ def get_model(
             model.model_type = model_type
         return model
 
+    breakpoint()
     if init_on_meta:
-        with torch.device("meta"):
+        with meta_device_context():
             model = build_model()
     else:
         model = build_model()
@@ -315,10 +349,7 @@ def get_model(
     # GPU allocation.
     # For FSDP2, we don't allocate GPU memory here. We allocate GPU memory
     # in the fully_shard function of FSDP2 instead.
-    if (
-        not (args.use_torch_fsdp2 and args.use_cpu_initialization)
-        and not args.init_model_with_meta_device
-    ):
+    if not (args.use_torch_fsdp2 and args.use_cpu_initialization) and not init_on_meta:
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
 
@@ -403,6 +434,7 @@ def get_model(
 
     return model
 
+
 def get_gpt_model_args(hf_config: Qwen3MoeConfig):
     return {
         "vocab_size": hf_config.vocab_size,
@@ -411,7 +443,13 @@ def get_gpt_model_args(hf_config: Qwen3MoeConfig):
         "rotary_base": hf_config.rope_theta,
     }
 
-def update_args_from_hf(args: Namespace, hf_config: Qwen3MoeConfig, use_transformer_engine: bool = True, **kwargs):
+
+def update_args(
+    args: Namespace,
+    hf_config: Qwen3MoeConfig,
+    use_transformer_engine: bool = True,
+    **kwargs,
+):
     args.vocab_size = hf_config.vocab_size
     args.padded_vocab_size = args.vocab_size
     args.max_position_embeddings = hf_config.max_position_embeddings
@@ -420,15 +458,33 @@ def update_args_from_hf(args: Namespace, hf_config: Qwen3MoeConfig, use_transfor
     args.rotary_percent = 1.0
     args.rotary_base = hf_config.rope_theta
     args.rope_scaling = True if hf_config.rope_scaling is not None else False
+
+    # Should TE for optimized parallel linear, attn, and moe grouped linear
     args.transformer_impl = "transformer_engine" if use_transformer_engine else "local"
-    
-    for k,v in kwargs.items():
+
+    for k, v in kwargs.items():
         setattr(args, k, v)
 
     return args
 
+
 # TODO:
 # attention backend, transformer_impl, optimizer config, te config
+# modelparallelconfig
+from contextlib import contextmanager
+
+
+@contextmanager
+def memory_context():
+    def get_memory(prefix: str = ""):
+        alloc, reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+        print(f"{prefix} - Alloc: {alloc / 1e9:.1f}GB Reserved: {reserved / 1e9:.1f}GB", flush=True)
+        return alloc, reserved
+
+    get_memory("BEFORE")
+    yield
+    get_memory("AFTER")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -443,7 +499,7 @@ if __name__ == "__main__":
     model_path = args.model_id
 
     hf_config: Qwen3MoeConfig = Qwen3MoeConfig.from_pretrained(model_path)
-    args = update_args_from_hf(args, hf_config, use_transformer_engine=True)
+    args = update_args(args, hf_config, use_transformer_engine=True)
     args = set_vpp_size(hf_config, args)
 
     init_distributed(
@@ -454,10 +510,43 @@ if __name__ == "__main__":
         ep=args.expert_model_parallel_size,
         etp=args.expert_tensor_parallel_size,
     )
+    init_on_meta = args.init_model_with_meta_device
+    init_on_cpu = args.use_cpu_initialization
+    assert not (init_on_meta and init_on_cpu), f"{init_on_meta=} and {init_on_cpu=} both set"
 
-    transformer_config = hf_to_mcore(hf_config)
+    # weights can't be initialized on meta
+    if init_on_meta:
+        args.perform_initialization = False
+
+    # Do not initialize so that we can init on meta device
+    transformer_config = hf_to_mcore(
+        hf_config,
+        perform_initialization=args.perform_initialization,
+        use_cpu_initialization=args.use_cpu_initialization,
+    )
 
     pp(asdict(transformer_config))
+    model_provider_func = get_model_provider_func(transformer_config, args)
+
+    device_context = meta_device_context if init_on_meta else nullcontext()
+    with memory_context(), meta_device_context():
+        model: GPTModel = model_provider_func(True, True)
+
+    from collections import Counter
+
+    def get_model_param_devices(model: torch.nn.Module):
+        param_devices = Counter(p.device.type for p in model.parameters())
+        print(f"Params on device: {param_devices.most_common()}")
+        return param_devices
+    
+    breakpoint()
+    print(model)
+    get_model_param_devices(model)
+
+    breakpoint()
+    model = get_model(model_provider_func, init_on_meta=init_on_meta)
+    print(model[0])
+    get_model_param_devices(model[0])
 
     # tokenizer_config = {
     #     "tokenizer_type": "HuggingFaceTokenizer",

@@ -14,6 +14,7 @@
     "iis.configDir": "",
     "python.analysis.extraPaths": [
         "/home/jeromeku/verl/thirdparty/mbridge",
-        "/home/jeromeku/verl/thirdparty/megatron-lm"
+        "/home/jeromeku/verl/thirdparty/megatron-lm",
+        "/home/jeromeku/verl/thirdparty/transformerengine"
     ]
 }
