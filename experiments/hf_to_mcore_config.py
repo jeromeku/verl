@@ -17,6 +17,16 @@ import megatron.core as mc
 MEGATRON_ROOT = Path(mc.__file__).parents[2]
 sys.path.append(MEGATRON_ROOT.resolve().as_posix())
 from megatron.training.arguments import _add_distributed_args, _add_moe_args
+import itertools
+import json
+import os
+from pathlib import Path
+
+import torch
+from huggingface_hub import snapshot_download
+from safetensors import safe_open
+from transformers import AutoConfig
+from transformers.utils.hub import cached_file
 
 import torch
 import torch.nn.functional as F
@@ -41,7 +51,7 @@ from megatron.core.distributed import (
 )
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
-
+from megatron.training.utils import unwrap_model
 try:
     from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
 
@@ -64,6 +74,17 @@ from contextlib import contextmanager
 from unittest.mock import patch
 import torch
 
+def weights_generator(model_id: str = None, weight_files: list[str|Path] = None, device: str = "cpu"):
+    assert model_id ^ weight_files
+    
+    if model_id:
+        model_cache_dir = Path(snapshot_download(model_id))
+        weight_files = list(model_cache_dir.glob("*.safetensors"))
+    
+    for wf in weight_files:
+        with safe_open(wf, 'pt', device=device) as f:
+            for k in f.keys():
+                yield k, f.get_tensor(k)
 
 @contextmanager
 def meta_device_context():
@@ -585,6 +606,18 @@ if __name__ == "__main__":
     mcore_param_count = sum(get_total_params(m) for m in model_parts)
     assert hf_param_count == mcore_param_count, f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
     
+    from weight_converter import remap_pp
+    for m in model_parts:
+        ref, test = remap_pp(m)
+
+    breakpoint()
+    model_parts = unwrap_model(model_parts)
+
+    # print([type(m) for m in model_parts])
+    # for idx, m in enumerate(model_parts):
+    #     print(f"Model part {idx}")
+    #     pp(m.state_dict().keys())
+    breakpoint()
     if False:
         print(f"HF Model total params: {hf_param_count}")
         print(f"MCore total params: {mcore_param_count}")
