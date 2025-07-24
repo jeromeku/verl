@@ -1,5 +1,9 @@
 # ruff: noqa
 import argparse
+from contextlib import contextmanager
+
+from collections import Counter
+
 import os
 import sys
 from dataclasses import asdict
@@ -27,7 +31,10 @@ from megatron.core.enums import ModelType
 from megatron.core.transformer.module import Float16Module
 from megatron.core.fp8_utils import correct_amax_history_if_needed
 
-from transformers.models.qwen3_moe import Qwen3MoeConfig
+from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
+
 from megatron.core.distributed import (
     DistributedDataParallelConfig,
     TorchFullyShardedDataParallelConfig,
@@ -42,8 +49,16 @@ try:
 except ImportError:
     HAVE_FSDP2 = False
 
+# Dense
+QWEN3_600M = "Qwen/Qwen3-0.6B"
+QWEN3_4B = "Qwen/Qwen3-4B"
+
+# MoE
 QWEN3_30B_3B = "Qwen/Qwen3-30B-A3B"
 QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
+
+QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
+QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
 
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -124,36 +139,46 @@ def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     }
 
 
-def get_moe_config(hf_config: Qwen3MoeConfig):
-    moe_config = {
+def get_mlp_config(hf_config: Qwen3MoeConfig, is_moe: bool = False):
+    mlp_config = {
         # Experts
         "gated_linear_unit": True,
         "activation_func": F.silu,
-        "moe_ffn_hidden_size": hf_config.moe_intermediate_size,
-        "num_moe_experts": hf_config.num_experts,
-        "moe_grouped_gemm": True,  # requires TransformerEngine
-        "moe_use_legacy_grouped_gemm": False,  # legacy cutlass grouped gemm
-        "moe_shared_expert_intermediate_size": None,  # no shared expert
-        # Router
-        "moe_router_dtype": torch.float32,
-        "moe_router_topk": hf_config.num_experts_per_tok,
-        "moe_router_score_function": "softmax",
-        "moe_router_pre_softmax": False,  # softmax is applied **after** topk in Qwen3-Moe
-        "moe_token_dispatcher_type": "alltoall",  # TODO: tune
-        # auxiliary loss
-        "moe_router_enable_expert_bias": False,  # aux-loss-free routing, only for sigmoid-scored router
-        "moe_router_load_balancing_type": "aux_loss",
-        "moe_expert_capacity_factor": None,  # token choice -> no dropped tokens
-        "moe_router_bias_update_rate": 0.001,  # TODO: check whether this is needed for aux_loss
-        "moe_aux_loss_coeff": hf_config.router_aux_loss_coef,
-        # optimizations
-        "moe_enable_deepep": False,
-        "moe_deepep_num_sms": 20,  # TODO: tune
-        "moe_layer_recompute": True,
-        "moe_permute_fusion": False,  # TODO: tune
-        "moe_per_layer_logging": True,  # for auxiliary loss
     }
-    return moe_config
+
+    if is_moe:
+        moe_config = {
+            # Experts
+            "gated_linear_unit": True,
+            "activation_func": F.silu,
+            "moe_ffn_hidden_size": hf_config.moe_intermediate_size,
+            "num_moe_experts": hf_config.num_experts,
+            "moe_grouped_gemm": True,  # requires TransformerEngine
+            "moe_use_legacy_grouped_gemm": False,  # legacy cutlass grouped gemm
+            "moe_shared_expert_intermediate_size": None,  # no shared expert
+            # Router
+            "moe_router_dtype": torch.float32,
+            "moe_router_topk": hf_config.num_experts_per_tok,
+            "moe_router_score_function": "softmax",
+            "moe_router_pre_softmax": False,  # softmax is applied **after** topk in Qwen3-Moe
+            "moe_token_dispatcher_type": "alltoall",  # TODO: tune
+            # auxiliary loss
+            "moe_router_enable_expert_bias": False,  # aux-loss-free routing, only for sigmoid-scored router
+            "moe_router_load_balancing_type": "aux_loss",
+            "moe_expert_capacity_factor": None,  # token choice -> no dropped tokens
+            "moe_router_bias_update_rate": 0.001,  # TODO: check whether this is needed for aux_loss
+            "moe_aux_loss_coeff": hf_config.router_aux_loss_coef,
+            # optimizations
+            "moe_enable_deepep": False,
+            "moe_deepep_num_sms": 20,  # TODO: tune
+            "moe_layer_recompute": True,
+            "moe_permute_fusion": False,  # TODO: tune
+            "moe_per_layer_logging": True,  # for auxiliary loss
+        }
+    else:
+        moe_config = {}
+
+    return {**mlp_config, **moe_config}
 
 
 def get_arch_config(hf_config: Qwen3MoeConfig):
@@ -205,14 +230,16 @@ def get_activation_recompute_config():
     }
 
 
-def hf_to_mcore(hf_config: Qwen3MoeConfig, **kwargs) -> TransformerConfig:
+def hf_to_mcore(hf_config: Qwen3MoeConfig, is_moe: bool = False,  **kwargs) -> TransformerConfig:
     dtype = hf_config.torch_dtype
+
     assert dtype == torch.bfloat16
 
     arch_config = get_arch_config(hf_config)
     attn_config = get_attn_config(hf_config)
-    moe_config = get_moe_config(hf_config)
 
+    mlp_config = get_mlp_config(hf_config, is_moe=is_moe)
+    
     precision_config = get_precision_config(dtype)
     parallelism_config = get_parallelism()
     fusion_config = get_fusion_config()
@@ -222,7 +249,7 @@ def hf_to_mcore(hf_config: Qwen3MoeConfig, **kwargs) -> TransformerConfig:
     final_config = TransformerConfig(
         **arch_config,
         **attn_config,
-        **moe_config,
+        **mlp_config,
         **precision_config,
         **parallelism_config,
         **fusion_config,
@@ -314,7 +341,6 @@ def get_model(
             model.model_type = model_type
         return model
 
-    breakpoint()
     if init_on_meta:
         with meta_device_context():
             model = build_model()
@@ -471,7 +497,11 @@ def update_args(
 # TODO:
 # attention backend, transformer_impl, optimizer config, te config
 # modelparallelconfig
-from contextlib import contextmanager
+
+
+def get_model_param_devices(model: torch.nn.Module):
+    param_devices = Counter(p.device.type for p in model.parameters())
+    return param_devices
 
 
 @contextmanager
@@ -485,20 +515,31 @@ def memory_context():
     yield
     get_memory("AFTER")
 
+def get_total_params(model: torch.nn.Module):
+    return sum(p.numel() for p in model.parameters())
+
+def get_module_param_count(model: torch.nn.Module):
+    return {n: get_total_params(m) for n,m in model.named_children()}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         "HF -> Megatron Config", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "--model_id", help="HF model path, e.g., Qwen/Qwen3-30B-A3B", default=QWEN3_30B_3B
+        "--model-id",
+        help="HF model path, e.g., Qwen/Qwen3-30B-A3B",
+        default=QWEN3_30B_3B,
+        choices=[*QWEN3_DENSE_MODELS, QWEN3_MOE_MODELS],
     )
+
     add_megatron_arguments(parser)
     args = parser.parse_args()
 
     model_path = args.model_id
-
-    hf_config: Qwen3MoeConfig = Qwen3MoeConfig.from_pretrained(model_path)
+    is_moe = model_path in QWEN3_MOE_MODELS
+    model_cls = Qwen3MoeForCausalLM if is_moe else Qwen3ForCausalLM
+    hf_config = AutoConfig.from_pretrained(model_path)
+    
     args = update_args(args, hf_config, use_transformer_engine=True)
     args = set_vpp_size(hf_config, args)
 
@@ -521,33 +562,56 @@ if __name__ == "__main__":
     # Do not initialize so that we can init on meta device
     transformer_config = hf_to_mcore(
         hf_config,
+        is_moe=is_moe,
         perform_initialization=args.perform_initialization,
         use_cpu_initialization=args.use_cpu_initialization,
     )
-
-    pp(asdict(transformer_config))
-    model_provider_func = get_model_provider_func(transformer_config, args)
-
-    device_context = meta_device_context if init_on_meta else nullcontext()
-    with memory_context(), meta_device_context():
-        model: GPTModel = model_provider_func(True, True)
-
-    from collections import Counter
-
-    def get_model_param_devices(model: torch.nn.Module):
-        param_devices = Counter(p.device.type for p in model.parameters())
-        print(f"Params on device: {param_devices.most_common()}")
-        return param_devices
     
-    breakpoint()
-    print(model)
-    get_model_param_devices(model)
+    pp(hf_config.to_dict())
+    pp(asdict(transformer_config))
 
-    breakpoint()
-    model = get_model(model_provider_func, init_on_meta=init_on_meta)
-    print(model[0])
-    get_model_param_devices(model[0])
+    model_provider_func = get_model_provider_func(transformer_config, args)
+    model_parts: list[GPTModel] = get_model(model_provider_func, init_on_meta=init_on_meta)
+    print(model_parts[0])
+    param_devices = get_model_param_devices(model_parts[0])
+    
+    if init_on_meta:
+        assert param_devices['meta'] == sum(len(list(m.parameters())) for m in model_parts)
 
+    with torch.device('meta'):
+        ref_model: Qwen3ForCausalLM = model_cls(hf_config)
+    
+    hf_param_count = get_total_params(ref_model)
+    mcore_param_count = sum(get_total_params(m) for m in model_parts)
+    assert hf_param_count == mcore_param_count, f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
+    
+    if False:
+        print(f"HF Model total params: {hf_param_count}")
+        print(f"MCore total params: {mcore_param_count}")
+        print()
+        
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3Model, Qwen3DecoderLayer
+        print("HF Model Param Counts")
+        pp(get_module_param_count(ref_model))
+        qwen3_model = ref_model.model
+        qwen3_decoder = qwen3_model.layers[0]
+        decoder_counts = get_module_param_count(qwen3_decoder)
+        pp(get_module_param_count(qwen3_model))
+        pp(get_module_param_count(qwen3_decoder))
+        print()
+        gpt_model = model_parts[0]
+        print("GPT Model Param Counts")
+        pp(get_module_param_count(gpt_model))
+        pp(get_module_param_count(gpt_model.decoder))
+        gpt_decoder = gpt_model.decoder.layers[0]
+        gpt_decoder_counts = get_module_param_count(gpt_decoder)
+        pp(get_module_param_count(gpt_model.decoder.layers[0]))
+        breakpoint()
+        ref_mlp = qwen3_decoder.mlp
+        test_mlp = gpt_decoder.mlp
+        pp(get_module_param_count(ref_mlp))
+        pp(get_module_param_count(test_mlp))
+    
     # tokenizer_config = {
     #     "tokenizer_type": "HuggingFaceTokenizer",
     #     "make-vocab-size-divisible-by": 1187,
