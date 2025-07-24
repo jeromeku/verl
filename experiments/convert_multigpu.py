@@ -6,19 +6,22 @@ import argparse
 import os
 
 import torch
+from mbridge import AutoBridge
+from mbridge.utils.post_creation_callbacks import freeze_moe_router, make_value_model
 from megatron.core import parallel_state as mpu
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
-from mbridge import AutoBridge
-from mbridge.utils.post_creation_callbacks import freeze_moe_router, make_value_model
 
-
-def init_distributed(tp=2, pp=1, cp=1, vpp=1, ep=1, etp=None):
+def init_distributed(tp=2, pp=1, cp=1, vpp=1, ep=1, etp=None, backend="nccl"):
     """Initialize distributed environment"""
-    torch.distributed.init_process_group("nccl")
-    torch.cuda.set_device(torch.distributed.get_rank())
+    torch.distributed.init_process_group(backend)
+    
+    if backend == "nccl":
+        torch.cuda.set_device(torch.distributed.get_rank())
+    
     if pp <= 1:
         vpp = None
+    
     mpu.initialize_model_parallel(
         tensor_model_parallel_size=tp,
         pipeline_model_parallel_size=pp,
@@ -51,6 +54,10 @@ def main():
     parser.add_argument(
         "--save_path", type=str, default=None, help="Path to save weights"
     )
+    parser.add_argument(
+        "--backend", type=str, default="nccl", help="dist backend"
+    )
+    
     args = parser.parse_args()
 
     # Initialize distributed environment
@@ -61,21 +68,23 @@ def main():
         vpp=args.vpp,
         ep=args.ep,
         etp=args.etp,
+        backend=args.backend
     )
 
     # Load model
     hf_model_path = args.model_path
     print(f"rank{torch.distributed.get_rank()}: start loading model")
     bridge = AutoBridge.from_pretrained(hf_model_path)
-    model = bridge.get_model(
-        post_model_creation_callbacks=[make_value_model, freeze_moe_router]
-    )
+#    post_model_creation_callbacks = [make_value_model, freeze_moe_router]
+    model = bridge.get_model(use_cpu_initialization=True)
+
     print(
         f"rank{torch.distributed.get_rank()}: start loading weights from {hf_model_path}"
     )
     bridge.load_weights(model, hf_model_path)
 
     # export weights
+
     for k, v in bridge.export_weights(model):
         gt = bridge.safetensor_io.load_one_hf_weight(k).to(v.device)
         if k != "lm_head.weight":
