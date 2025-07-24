@@ -529,7 +529,7 @@ if __name__ == "__main__":
         "--model-id",
         help="HF model path, e.g., Qwen/Qwen3-30B-A3B",
         default=QWEN3_30B_3B,
-        choices=[*QWEN3_DENSE_MODELS, QWEN3_MOE_MODELS],
+        choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
     )
 
     add_megatron_arguments(parser)
