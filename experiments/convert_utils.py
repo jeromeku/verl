@@ -625,7 +625,15 @@ def _local_to_hf(local_to_global: dict[str, str], is_moe: bool = False):
     }
     return local_to_hf_map
 
+def _extract_layer_number(name: str):
+    match = LAYER_NUMBER_REGEX.search(name)
+    
+    if not match:
+        raise ValueError(f"Could not identify layer number in {name}")
 
+    layer_number = int(match.group(1))
+
+    return layer_number
 
 def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool = False) -> dict[str, str]:
 
@@ -633,13 +641,22 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
     attention_mapping = MCORE_TO_HF_PARAM_MAPPINGS["attention"]
     mlp_mapping = MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["moe"] if is_moe else MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["dense"]
 
+    def _map_attn(name: str) -> list[str]:
+        layer_number = _extract_layer_number(name)
+
+        mapped_names = []
+        for keyword, mapping_names in attention_mapping.items():
+            if keyword in name:
+                mapped_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
+                break
+        
+        if len(mapped_names) == 0:
+            raise ValueError(f"Attention parameter name {name} not recognized")
+        
+        return mapped_names
+
     def _map_mlp(name: str) -> list[str]:
-        match = LAYER_NUMBER_REGEX.search(name)
-        
-        if not match:
-            raise ValueError(f"MLP parameter name {name} missing layer number")
-        
-        layer_number = int(match.group(1))
+        layer_number = _extract_layer_number(name)
 
         mapped_names = []
         for mcore_pat, hf_pats in mlp_mapping.items():
@@ -673,7 +690,7 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
         
         if hf_name is None:
             if MCORE_ATTN_PAT in name:
-                hf_name = _weight_name_mapping_attention(name)
+                hf_name = _map_attn(name)
             elif MCORE_MLP_PAT in name:
                 hf_name = _map_mlp(name)
             else:
