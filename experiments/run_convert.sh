@@ -4,12 +4,12 @@ set -euo pipefail
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
 QWEN3_MOE="Qwen/Qwen3-30B-A3B"
 
-MODEL_ID="${QWEN3_MOE}"
+MODEL_ID="${QWEN3_DENSE}"
 
 TP=1
 PP=1
 CP=1
-EP=2
+EP=1
 ETP=1
 VPP_SIZE=None
 
@@ -27,16 +27,30 @@ LAUNCHER=${LOCAL_LAUNCH}
 
 BACKEND="fake"
 RANK=0
+INIT_META="--init-model-with-meta-device"
+INIT_CPU="--use-cpu-initialization"
+
+INIT_METHOD=${INIT_CPU}
 
 LAUNCH_CMD="${LAUNCHER} hf_to_mcore_config.py"
+SAVE_DIR="mcore_chkpts"
+CKPT_FORMAT="torch" # torch_dist
+
+mkdir -p ${SAVE_DIR}
 
 ARGS="--model-id ${MODEL_ID} \
---init-model-with-meta-device \
 --tensor-model-parallel-size ${TP} \
 --pipeline-model-parallel-size ${PP} \
 --context-parallel-size ${CP} \
 --expert-model-parallel-size ${EP} \
---expert-tensor-parallel-size ${ETP}"
+--expert-tensor-parallel-size ${ETP} \
+--save ${SAVE_DIR} \
+--save-interval 1 \
+--ckpt-format ${CKPT_FORMAT}"
+
+if [[ ${INIT_METHOD} == ${INIT_CPU} || ${INIT_METHOD} == ${INIT_META} ]]; then
+    ARGS+=" ${INIT_METHOD}"
+fi
 
 if [[ "${VPP_SIZE}" != "None" && "${VPP_SIZE}" -gt 1 ]]; then
     if [[ "${PP}" -le 1 ]]; then

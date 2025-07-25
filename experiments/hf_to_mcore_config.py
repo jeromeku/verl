@@ -230,6 +230,17 @@ if __name__ == "__main__":
     for map in name_maps:
         pp(map)
 
+    if args.use_cpu_initialization:
+        from megatron.training.checkpointing import save_checkpoint, load_checkpoint
+        save_checkpoint(1, model_parts, None, None, 0)
+    
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    
+    args.load = args.save
+
+    load_checkpoint(model_parts, None, None, strict=True)
+
     # print([type(m) for m in model_parts])
     # for idx, m in enumerate(model_parts):
     #     print(f"Model part {idx}")
