@@ -37,7 +37,8 @@ from convert_utils import (
     init_mpu,
     get_model,
     get_model_provider_func,
-    remap_pp,
+    remap_param_names_for_ep_pp,
+    _weight_name_mapping_mcore_local_to_global
 )
 from qwen3_configs import (
     get_activation_recompute_config,
@@ -215,8 +216,16 @@ if __name__ == "__main__":
 
     name_maps = []
     for m in model_parts:
-        map = remap_pp(m)
-        name_maps.append(map)
+        test = remap_param_names_for_ep_pp(m)
+        ref = _weight_name_mapping_mcore_local_to_global(m)
+        if test != ref:
+            key_diff = set(ref.keys()) - set(ref.keys())
+            val_diff = set(ref.values()) - set(test.values())
+            print(f"{key_diff=}")
+            print(f"{val_diff=}")
+            assert False
+
+        name_maps.append(test)
 
     for map in name_maps:
         pp(map)

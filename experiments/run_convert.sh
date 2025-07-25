@@ -4,23 +4,29 @@ set -euo pipefail
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
 QWEN3_MOE="Qwen/Qwen3-30B-A3B"
 
-MODEL_ID="${QWEN3_DENSE}"
+MODEL_ID="${QWEN3_MOE}"
 
 TP=1
-PP=2
+PP=1
 CP=1
-EP=1
+EP=2
 ETP=1
 VPP_SIZE=None
 
-WORLD_SIZE=$((TP * CP * PP))
+WORLD_SIZE_NON_MOE=$((TP * CP * PP))
+WORLD_SIZE_MOE=$((EP * ETP * PP))
+if [[ "${WORLD_SIZE_NON_MOE}" -gt "${WORLD_SIZE_MOE}" ]]; then
+    WORLD_SIZE=${WORLD_SIZE_NON_MOE}
+else
+    WORLD_SIZE=${WORLD_SIZE_MOE}
+fi
 
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
 LAUNCHER=${LOCAL_LAUNCH}
 
 BACKEND="fake"
-RANK=1
+RANK=0
 
 LAUNCH_CMD="${LAUNCHER} hf_to_mcore_config.py"
 
@@ -33,6 +39,10 @@ ARGS="--model-id ${MODEL_ID} \
 --expert-tensor-parallel-size ${ETP}"
 
 if [[ "${VPP_SIZE}" != "None" && "${VPP_SIZE}" -gt 1 ]]; then
+    if [[ "${PP}" -le 1 ]]; then
+        echo "ERROR: PP must be > 1 when VPP_SIZE not None"
+        exit 1
+    fi 
     ARGS+=" --num-virtual-stages-per-pipeline-rank ${VPP_SIZE}"
 fi
 

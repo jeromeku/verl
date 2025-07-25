@@ -28,7 +28,7 @@ try:
     HAVE_FSDP2 = True
 except ImportError:
     HAVE_FSDP2 = False
-from qwen3_configs import Qwen3ConfigT
+from qwen3_configs import Qwen3ConfigT, Qwen3MoeConfig
 
 
 def update_args(
@@ -45,6 +45,9 @@ def update_args(
     args.seq_length = hf_config.max_position_embeddings
     args.micro_batch_size = 1
 
+    if isinstance(hf_config, Qwen3MoeConfig):
+        args.num_experts = hf_config.num_experts
+        
     args.vocab_size = hf_config.vocab_size
     args.padded_vocab_size = args.vocab_size
     args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
@@ -374,11 +377,6 @@ def remap_pp(model: torch.nn.Module | GPTModel):
     for idx, layer in enumerate(model.decoder.layers):
         local_to_global[idx] = layer.layer_number - 1
 
-    _all_param_names = [
-        k for k in model.state_dict().keys() if "_extra_state" not in k
-    ]
-    all_param_names = remove_te_keys(model.state_dict().keys())
-    assert _all_param_names == all_param_names
     
     def _rename_decoder_layers(param_names: list[str]):
         name_map = {}
@@ -394,6 +392,12 @@ def remap_pp(model: torch.nn.Module | GPTModel):
     
         return name_map
     
+    _all_param_names = [
+        k for k in model.state_dict().keys() if "_extra_state" not in k
+    ]
+    all_param_names = remove_te_keys(model.state_dict().keys())
+    assert _all_param_names == all_param_names
+
     name_map = _rename_decoder_layers(all_param_names)
     
     ret = {}
@@ -414,9 +418,59 @@ def remap_pp(model: torch.nn.Module | GPTModel):
     
     return name_map
 
-def _weight_name_mapping_mcore_local_to_global(
-        self, model: torch.nn.Module, consider_ep: bool = True
-    ) -> dict[str, str]:
+def remap_param_names_for_ep_pp(model:GPTModel):
+    model = unwrap_model(model)
+    
+    # Remap from pp layer shard idx -> global layer idx
+    # NOTE: "layer_number" starts at 1
+    assert hasattr(model, "decoder")
+
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    ep_rank = mpu.get_expert_model_parallel_rank()
+
+    def _remap_pp_layers(param_names: list[str]):
+        local_to_global = {}
+        for idx, layer in enumerate(model.decoder.layers):
+            local_to_global[idx] = layer.layer_number - 1
+
+        name_map = {}
+        for name in param_names:
+            match = re.search(LAYER_NUMBER_PAT, name)
+            if match:
+                local_layer_idx = int(match.group(1))
+                global_layer_idx = local_to_global[local_layer_idx]
+                new_name = name.replace(f"layers.{local_layer_idx}", f"layers.{global_layer_idx}")
+            else:
+                new_name = name
+            name_map[name] = new_name
+    
+        return name_map
+    
+    def _remap_ep_layers(name_map: dict[str,str]):
+        num_experts = model.config.num_moe_experts
+        num_experts_per_rank = num_experts // ep_size
+        local_expert_to_global_expert = {
+            i: i + num_experts_per_rank * ep_rank
+            for i in range(num_experts_per_rank)
+        }
+        for k in name_map.keys():
+            v = name_map[k]
+            if ".mlp.experts.linear_fc" in v:
+                name_prefix, local_expert_id = v.split(".weight")
+                global_expert_idx = local_expert_to_global_expert[
+                    int(local_expert_id)
+                ]
+                name_map[k] = f"{name_prefix}.weight{global_expert_idx}"
+
+    all_param_names = remove_te_keys(model.state_dict().keys())
+    name_map = _remap_pp_layers(all_param_names)    
+
+    if ep_size > 1:
+        _remap_ep_layers(name_map)
+    
+    return name_map
+        
+def _weight_name_mapping_mcore_local_to_global(model: GPTModel) -> dict[str, str]:
         """
         Map local weight names to global weight names, supporting VPP and EP.
 
@@ -448,11 +502,14 @@ def _weight_name_mapping_mcore_local_to_global(
                 ret[param_name] = param_name
 
         # ep
-        if self.mpu.ep_size > 1 and consider_ep:
-            num_experts = self.config.num_moe_experts
-            num_experts_per_rank = num_experts // self.mpu.ep_size
+        ep_size = mpu.get_expert_model_parallel_world_size()
+        ep_rank = mpu.get_expert_model_parallel_rank()
+
+        if ep_size > 1:
+            num_experts = model.config.num_moe_experts
+            num_experts_per_rank = num_experts // ep_size
             local_expert_to_global_expert = {
-                i: i + num_experts_per_rank * self.mpu.ep_rank
+                i: i + num_experts_per_rank * ep_rank
                 for i in range(num_experts_per_rank)
             }
             for k in ret.keys():
