@@ -39,8 +39,7 @@ CMD="${LAUNCHER} hf_to_mcore_config.py \
 --num-virtual-stages-per-pipeline-rank ${VPP_SIZE} \
 --context-parallel-size ${CP} \
 --expert-model-parallel-size ${EP} \
---expert-tensor-parallel-size ${ETP} \
---micro-batch-size=1"
+--expert-tensor-parallel-size ${ETP}"
 
 echo "${CMD}"
 eval "${CMD}"

@@ -1,7 +1,7 @@
 # ruff: noqa
 import argparse
 from contextlib import contextmanager
-
+from convert_utils import update_args
 from collections import Counter
 
 import os
@@ -16,7 +16,7 @@ import megatron.core as mc
 
 MEGATRON_ROOT = Path(mc.__file__).parents[2]
 sys.path.append(MEGATRON_ROOT.resolve().as_posix())
-from megatron.training.arguments import _add_distributed_args, _add_moe_args
+
 import itertools
 import json
 import os
@@ -31,7 +31,7 @@ from transformers.utils.hub import cached_file
 import torch
 import torch.nn.functional as F
 from megatron.training.arguments import add_megatron_arguments, validate_args
-
+from megatron.training.global_vars import set_global_variables
 from megatron.core import mpu, tensor_parallel
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
@@ -504,40 +504,6 @@ def get_gpt_model_args(hf_config: Qwen3MoeConfig):
     }
 
 
-def update_args(
-    args: Namespace,
-    hf_config: Qwen3MoeConfig,
-    use_transformer_engine: bool = True,
-    **kwargs,
-):
-    
-    # Required args for MCore args validation
-    args.max_position_embeddings = hf_config.max_position_embeddings
-    args.num_layers = hf_config.num_hidden_layers
-    args.hidden_size = hf_config.hidden_size
-    args.num_attention_heads = hf_config.num_attention_heads
-    args.seq_length = hf_config.max_position_embeddings
-
-    args.vocab_size = hf_config.vocab_size
-    args.padded_vocab_size = args.vocab_size
-    args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
-    args.position_embedding_type = "rope"
-    args.rotary_percent = 1.0
-    args.rotary_base = hf_config.rope_theta
-    args.rope_scaling = True if hf_config.rope_scaling is not None else False
-
-    args.rank = torch.distributed.get_rank()
-    args.world_size = torch.distributed.get_world_size()
-
-    # Should TE for optimized parallel linear, attn, and moe grouped linear
-    args.transformer_impl = "transformer_engine" if use_transformer_engine else "local"
-
-    for k, v in kwargs.items():
-        setattr(args, k, v)
-
-    return args
-
-
 # TODO:
 # attention backend, transformer_impl, optimizer config, te config
 # modelparallelconfig
@@ -576,6 +542,8 @@ if __name__ == "__main__":
         choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
     )
     parser.add_argument("--backend", default="fake", choices=["fake", "gloo", "nccl"])
+    parser.add_argument("--rank", default=None, type=int)
+    parser.add_argument("--world_size", default=None, type=int)
 
     add_megatron_arguments(parser)
     args = parser.parse_args()
@@ -587,8 +555,9 @@ if __name__ == "__main__":
     
     init_distributed(backend=args.backend)
     args = update_args(args, hf_config, use_transformer_engine=True)
-    validate_args(args)
-    
+    args = validate_args(args)
+    set_global_variables(args, build_tokenizer=False)
+
     breakpoint()
 
     #args = set_vpp_size(hf_config, args)
