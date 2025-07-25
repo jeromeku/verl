@@ -225,7 +225,7 @@ if __name__ == "__main__":
     # for idx, m in enumerate(model_parts):
     #     print(f"Model part {idx}")
     #     pp(m.state_dict().keys())
-    breakpoint()
+    
     if False:
         print(f"HF Model total params: {hf_param_count}")
         print(f"MCore total params: {mcore_param_count}")

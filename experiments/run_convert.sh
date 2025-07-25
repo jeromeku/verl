@@ -1,41 +1,57 @@
 #!/bin/bash
 set -euo pipefail
 
-MODEL_ID="Qwen/Qwen3-0.6B"
+QWEN3_DENSE="Qwen/Qwen3-0.6B"
+QWEN3_MOE="Qwen/Qwen3-30B-A3B"
+
+MODEL_ID="${QWEN3_DENSE}"
+
 TP=1
 PP=2
 CP=1
 EP=1
 ETP=1
-VPP_SIZE=2
+VPP_SIZE=None
 
 WORLD_SIZE=$((TP * CP * PP))
-BACKEND="fake"
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-
 
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
 LAUNCHER=${LOCAL_LAUNCH}
-RANK=0 # only used when using fake init
-#export WORLD_SIZE
 
-CMD="${LAUNCHER} hf_to_mcore_config.py \
---model-id ${MODEL_ID} \
---backend ${BACKEND} \
+BACKEND="fake"
+RANK=1
+
+LAUNCH_CMD="${LAUNCHER} hf_to_mcore_config.py"
+
+ARGS="--model-id ${MODEL_ID} \
 --init-model-with-meta-device \
 --tensor-model-parallel-size ${TP} \
 --pipeline-model-parallel-size ${PP} \
---num-virtual-stages-per-pipeline-rank ${VPP_SIZE} \
 --context-parallel-size ${CP} \
 --expert-model-parallel-size ${EP} \
 --expert-tensor-parallel-size ${ETP}"
 
-if [[ ${LAUNCHER} == ${LOCAL_LAUNCH} ]]; then
-    CMD+=" --world_size ${WORLD_SIZE} --rank ${RANK}"
+if [[ "${VPP_SIZE}" != "None" && "${VPP_SIZE}" -gt 1 ]]; then
+    ARGS+=" --num-virtual-stages-per-pipeline-rank ${VPP_SIZE}"
 fi
 
+# Add world_size and rank for local launches
+if [[ "${LAUNCHER}" == "${LOCAL_LAUNCH}" ]]; then
+    ARGS+=" --backend fake --world_size ${WORLD_SIZE} --rank ${RANK}"
+else
+    ARGS+=" --backend ${BACKEND}"
+fi
+
+# Correctly combine the launch command and arguments
+CMD="${LAUNCH_CMD} ${ARGS}"
+
+
 echo "${CMD}"
+
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+#export WORLD_SIZE=${WORLD_SIZE}
+
 eval "${CMD}"
 
 #VPP_STAGE_SIZE=1

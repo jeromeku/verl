@@ -17,5 +17,8 @@
         "/home/jeromeku/verl/thirdparty/megatron-lm",
         "/home/jeromeku/verl/thirdparty/transformerengine",
         "/home/jeromeku/verl/thirdparty/TensorRT-Model-Optimizer"
-    ]
+    ],
+    "[shellscript]": {
+  "editor.defaultFormatter": "foxundermoon.shell-format"
+}
 }
