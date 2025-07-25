@@ -18,6 +18,9 @@ BACKEND="fake"
 # VP_STAGES = NUM_LAYERS // (PP * VPP)
 # VP_STAGE virtual ranks
 # Virtual rank ==> real rank = VIRTUAL_RANK % pp_size
+# For Qwen 0.6B, 28 layers
+# for PP=2, VPP=2, 28 // 2 = 14 stages per rank, interleaved such that Rank 0: [1-7],[15-21] | Rank1: [8-14],[22-28]
+# Note that layer_id's start at 1 in decoder layers
 #--num_layers_per_virtual_pipeline_stage ${VPP_STAGE_SIZE} \
 # model_parallel_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
 export CUDA_DEVICE_MAX_CONNECTIONS=1
