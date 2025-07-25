@@ -6,6 +6,17 @@ from transformers.models.qwen3_moe import Qwen3MoeConfig
 
 Qwen3ConfigT = Qwen3Config | Qwen3MoeConfig
 
+# Dense
+QWEN3_600M = "Qwen/Qwen3-0.6B"
+QWEN3_4B = "Qwen/Qwen3-4B"
+
+# MoE
+QWEN3_30B_3B = "Qwen/Qwen3-30B-A3B"
+QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
+
+QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
+QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
+
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     return {
         "tensor_model_parallel_size": mpu.get_tensor_model_parallel_world_size(),
@@ -21,41 +32,77 @@ def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     }
 
 
-def get_mlp_config(hf_config: Qwen3ConfigT, is_moe: bool = False):
+def get_mlp_config(
+    hf_config: Qwen3ConfigT,
+    is_moe: bool = False,
+    # MLP
+    gated_linear_unit: bool = True,
+    activation_func=F.silu,
+    # Experts
+    moe_grouped_gemm: bool = True,
+    moe_use_legacy_grouped_gemm: bool = False,
+    moe_shared_expert_intermediate_size=None,
+    # Router
+    moe_router_dtype=torch.float32,
+    moe_router_score_function: str = "softmax",
+    moe_router_pre_softmax: bool = False,
+    moe_token_dispatcher_type: str = "alltoall",
+    moe_router_enable_expert_bias: bool = False,
+    moe_router_load_balancing_type: str = "aux_loss",
+    moe_expert_capacity_factor=None,
+    moe_router_bias_update_rate: float = 0.001,
+    # Optimizations
+    moe_enable_deepep: bool = False,
+    moe_deepep_num_sms: int = 20,
+    moe_layer_recompute: bool = True,
+    moe_permute_fusion: bool = False,
+    moe_per_layer_logging: bool = True,
+):
+    if isinstance(hf_config, Qwen3ConfigT):
+        assert gated_linear_unit
+        assert activation_func == F.silu
+
     mlp_config = {
         # Experts
-        "gated_linear_unit": True,
-        "activation_func": F.silu,
+        "gated_linear_unit": gated_linear_unit,
+        "activation_func": activation_func,
     }
 
     if is_moe:
+        if isinstance(hf_config, Qwen3ConfigT):
+            # Checks specific for Qwen3Moe
+            assert moe_shared_expert_intermediate_size is None
+            assert moe_router_score_function == "softmax"
+            assert not moe_router_pre_softmax
+            assert not moe_router_enable_expert_bias
+            assert moe_router_load_balancing_type == "aux_loss"
+            assert moe_expert_capacity_factor is None
+
         moe_config = {
             # Experts
-            "gated_linear_unit": True,
-            "activation_func": F.silu,
             "moe_ffn_hidden_size": hf_config.moe_intermediate_size,
             "num_moe_experts": hf_config.num_experts,
-            "moe_grouped_gemm": True,  # requires TransformerEngine
-            "moe_use_legacy_grouped_gemm": False,  # legacy cutlass grouped gemm
-            "moe_shared_expert_intermediate_size": None,  # no shared expert
+            "moe_grouped_gemm": moe_grouped_gemm,  # requires TransformerEngine
+            "moe_use_legacy_grouped_gemm": moe_use_legacy_grouped_gemm,  # legacy cutlass grouped gemm
+            "moe_shared_expert_intermediate_size": moe_shared_expert_intermediate_size,  # no shared expert
             # Router
-            "moe_router_dtype": torch.float32,
+            "moe_router_dtype": moe_router_dtype,
             "moe_router_topk": hf_config.num_experts_per_tok,
-            "moe_router_score_function": "softmax",
-            "moe_router_pre_softmax": False,  # softmax is applied **after** topk in Qwen3-Moe
-            "moe_token_dispatcher_type": "alltoall",  # TODO: tune
+            "moe_router_score_function": moe_router_score_function,
+            "moe_router_pre_softmax": moe_router_pre_softmax,  # softmax is applied **after** topk in Qwen3-Moe
+            "moe_token_dispatcher_type": moe_token_dispatcher_type,  # TODO: tune
             # auxiliary loss
-            "moe_router_enable_expert_bias": False,  # aux-loss-free routing, only for sigmoid-scored router
-            "moe_router_load_balancing_type": "aux_loss",
-            "moe_expert_capacity_factor": None,  # token choice -> no dropped tokens
-            "moe_router_bias_update_rate": 0.001,  # TODO: check whether this is needed for aux_loss
+            "moe_router_enable_expert_bias": moe_router_enable_expert_bias,  # aux-loss-free routing, only for sigmoid-scored router
+            "moe_router_load_balancing_type": moe_router_load_balancing_type,
+            "moe_expert_capacity_factor": moe_expert_capacity_factor,  # token choice -> no dropped tokens
+            "moe_router_bias_update_rate": moe_router_bias_update_rate,  # TODO: check whether this is needed for aux_loss
             "moe_aux_loss_coeff": hf_config.router_aux_loss_coef,
             # optimizations
-            "moe_enable_deepep": False,
-            "moe_deepep_num_sms": 20,  # TODO: tune
-            "moe_layer_recompute": True,
-            "moe_permute_fusion": False,  # TODO: tune
-            "moe_per_layer_logging": True,  # for auxiliary loss
+            "moe_enable_deepep": moe_enable_deepep,
+            "moe_deepep_num_sms": moe_deepep_num_sms,  # TODO: tune
+            "moe_layer_recompute": moe_layer_recompute,
+            "moe_permute_fusion": moe_permute_fusion,  # TODO: tune
+            "moe_per_layer_logging": moe_per_layer_logging,  # for auxiliary loss
         }
     else:
         moe_config = {}
@@ -76,11 +123,12 @@ def get_arch_config(
         "add_bias_linear": add_bias_linear,
     }
 
-# NOTE: Qwen3Configs specify a head_dim
-def get_attn_config(hf_config: Qwen3ConfigT, qk_layernorm: bool = True):
 
+def get_attn_config(hf_config: Qwen3ConfigT, qk_layernorm: bool = True):
     if isinstance(hf_config, Qwen3ConfigT):
+        # Qwen3 specifies a head_dim, important for calculating correct qkv proj dims
         assert hasattr(hf_config, "head_dim") and hf_config.head_dim is not None
+        assert qk_layernorm
 
     return {
         "num_attention_heads": hf_config.num_attention_heads,
@@ -93,7 +141,10 @@ def get_attn_config(hf_config: Qwen3ConfigT, qk_layernorm: bool = True):
     }
 
 
-def get_precision_config(dtype: torch.dtype = torch.bfloat16):
+def get_precision_config(hf_config: Qwen3ConfigT, dtype: torch.dtype = torch.bfloat16):
+    if isinstance(hf_config, Qwen3ConfigT):
+        assert dtype == hf_config.torch_dtype
+
     return {
         "pipeline_dtype": dtype,
         "params_dtype": dtype,
@@ -101,7 +152,7 @@ def get_precision_config(dtype: torch.dtype = torch.bfloat16):
     }
 
 
-
+# Optimizations - disable all when converting checkpoint
 def get_fusion_config(
     masked_softmax_fusion: bool = False,
     persist_layer_norm: bool = False,
@@ -114,6 +165,7 @@ def get_fusion_config(
         "bias_activation_fusion": bias_activation_fusion,
         "bias_dropout_fusion": bias_dropout_fusion,
     }
+
 
 def get_activation_recompute_config(
     recompute_granularity=None,

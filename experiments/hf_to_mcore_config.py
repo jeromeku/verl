@@ -1,57 +1,50 @@
-# ruff: noqa
-import argparse
-from contextlib import contextmanager
-from convert_utils import update_args
-from collections import Counter
-
-import os
+# ruff: noqa E402
 import sys
-from dataclasses import asdict
 from pathlib import Path
-from pprint import pp
-from contextlib import ExitStack, nullcontext
-from argparse import Namespace
-import dataclasses
+
 import megatron.core as mc
 
 MEGATRON_ROOT = Path(mc.__file__).parents[2]
 sys.path.append(MEGATRON_ROOT.resolve().as_posix())
 
+import argparse
+import dataclasses
 import itertools
 import json
 import os
+from argparse import Namespace
+from collections import Counter
+from contextlib import ExitStack, contextmanager, nullcontext
+from dataclasses import asdict
 from pathlib import Path
-
-import torch
-from huggingface_hub import snapshot_download
-from safetensors import safe_open
-from transformers import AutoConfig
-from transformers.utils.hub import cached_file
+from pprint import pp
 
 import torch
 import torch.nn.functional as F
-from megatron.training.arguments import add_megatron_arguments, validate_args
-from megatron.training.global_vars import set_global_variables
+from huggingface_hub import snapshot_download
 from megatron.core import mpu, tensor_parallel
-from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from megatron.core.transformer import TransformerConfig
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
-from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.enums import ModelType
-from megatron.core.transformer.module import Float16Module
-from megatron.core.fp8_utils import correct_amax_history_if_needed
-
-from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
-from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
-from transformers import AutoConfig, AutoModelForCausalLM
-
+from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import (
     DistributedDataParallelConfig,
     TorchFullyShardedDataParallelConfig,
 )
-from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.custom_fsdp import FullyShardedDataParallel as custom_FSDP
+from megatron.core.enums import ModelType
+from megatron.core.fp8_utils import correct_amax_history_if_needed
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+from megatron.core.transformer import TransformerConfig
+from megatron.core.transformer.module import Float16Module
+from megatron.training.arguments import add_megatron_arguments, validate_args
+from megatron.training.global_vars import set_global_variables
 from megatron.training.utils import unwrap_model
+from safetensors import safe_open
+from transformers import AutoConfig, AutoModelForCausalLM
+from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
+from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers.utils.hub import cached_file
+
 try:
     from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
 
@@ -59,20 +52,23 @@ try:
 except ImportError:
     HAVE_FSDP2 = False
 
-# Dense
-QWEN3_600M = "Qwen/Qwen3-0.6B"
-QWEN3_4B = "Qwen/Qwen3-4B"
-
-# MoE
-QWEN3_30B_3B = "Qwen/Qwen3-30B-A3B"
-QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
-
-QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
-QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
+from convert_utils import update_args
+from qwen3_configs import (
+    get_activation_recompute_config,
+    get_arch_config,
+    get_attn_config,
+    get_fusion_config,
+    get_mlp_config,
+    get_parallelism,
+    get_precision_config,
+    QWEN3_DENSE_MODELS, QWEN3_MOE_MODELS
+)
 
 from contextlib import contextmanager
 from unittest.mock import patch
+
 import torch
+
 
 def weights_generator(model_id: str = None, weight_files: list[str|Path] = None, device: str = "cpu"):
     assert model_id ^ weight_files
@@ -156,112 +152,6 @@ def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
         create_gloo_process_groups=False
     )
     model_parallel_cuda_manual_seed(seed)
-
-
-def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
-    return {
-        "tensor_model_parallel_size": mpu.get_tensor_model_parallel_world_size(),
-        "pipeline_model_parallel_size": mpu.get_pipeline_model_parallel_world_size(),
-        "virtual_pipeline_model_parallel_size": mpu.get_virtual_pipeline_model_parallel_world_size(),
-        "expert_model_parallel_size": mpu.get_expert_model_parallel_world_size(),
-        "expert_tensor_parallel_size": mpu.get_expert_tensor_parallel_world_size(),
-        "context_parallel_size": mpu.get_data_parallel_world_size(),
-        "sequence_parallel": sequence_parallel or mpu.get_tensor_model_parallel_world_size() > 1,
-        # Setting this communicates the size of tensors during pp comms.
-        # Incurs overhead, should only be set if seqlen varies by microbatch within a global batch.
-        "variable_seq_lengths": variable_seq_lengths,
-    }
-
-
-def get_mlp_config(hf_config: Qwen3MoeConfig, is_moe: bool = False):
-    mlp_config = {
-        # Experts
-        "gated_linear_unit": True,
-        "activation_func": F.silu,
-    }
-
-    if is_moe:
-        moe_config = {
-            # Experts
-            "gated_linear_unit": True,
-            "activation_func": F.silu,
-            "moe_ffn_hidden_size": hf_config.moe_intermediate_size,
-            "num_moe_experts": hf_config.num_experts,
-            "moe_grouped_gemm": True,  # requires TransformerEngine
-            "moe_use_legacy_grouped_gemm": False,  # legacy cutlass grouped gemm
-            "moe_shared_expert_intermediate_size": None,  # no shared expert
-            # Router
-            "moe_router_dtype": torch.float32,
-            "moe_router_topk": hf_config.num_experts_per_tok,
-            "moe_router_score_function": "softmax",
-            "moe_router_pre_softmax": False,  # softmax is applied **after** topk in Qwen3-Moe
-            "moe_token_dispatcher_type": "alltoall",  # TODO: tune
-            # auxiliary loss
-            "moe_router_enable_expert_bias": False,  # aux-loss-free routing, only for sigmoid-scored router
-            "moe_router_load_balancing_type": "aux_loss",
-            "moe_expert_capacity_factor": None,  # token choice -> no dropped tokens
-            "moe_router_bias_update_rate": 0.001,  # TODO: check whether this is needed for aux_loss
-            "moe_aux_loss_coeff": hf_config.router_aux_loss_coef,
-            # optimizations
-            "moe_enable_deepep": False,
-            "moe_deepep_num_sms": 20,  # TODO: tune
-            "moe_layer_recompute": True,
-            "moe_permute_fusion": False,  # TODO: tune
-            "moe_per_layer_logging": True,  # for auxiliary loss
-        }
-    else:
-        moe_config = {}
-
-    return {**mlp_config, **moe_config}
-
-
-def get_arch_config(hf_config: Qwen3MoeConfig):
-    return {
-        "num_layers": hf_config.num_hidden_layers,
-        "hidden_size": hf_config.hidden_size,
-        "layernorm_epsilon": hf_config.rms_norm_eps,
-        "normalization": "RMSNorm",
-        "add_bias_linear": False,  # no bias in linear layers (qkv & mlp)
-    }
-
-
-def get_attn_config(hf_config: Qwen3MoeConfig):
-    return {
-        "num_attention_heads": hf_config.num_attention_heads,
-        "num_query_groups": hf_config.num_key_value_heads,
-        "ffn_hidden_size": hf_config.intermediate_size,
-        "attention_dropout": hf_config.attention_dropout,
-        "hidden_dropout": getattr(hf_config, "hidden_dropout", 0.0),
-        "kv_channels": getattr(hf_config, "head_dim", None),  # hidden_size // num_attention_heads
-        "qk_layernorm": True,
-    }
-
-
-def get_precision_config(dtype: torch.dtype = torch.bfloat16):
-    return {
-        "pipeline_dtype": dtype,
-        "params_dtype": dtype,
-        "bf16": dtype is torch.bfloat16,  # Should be true for Qwen3
-    }
-
-
-def get_fusion_config():
-    return {
-        "masked_softmax_fusion": False,
-        "persist_layer_norm": False,
-        "bias_activation_fusion": False,
-        "bias_dropout_fusion": False,
-    }
-
-
-def get_activation_recompute_config():
-    return {
-        "recompute_granularity": None,
-        "recompute_method": None,
-        "recompute_num_layers": None,
-        "distribute_saved_activations": None,
-        "recompute_modules": None,
-    }
 
 
 def hf_to_mcore(hf_config: Qwen3MoeConfig, is_moe: bool = False,  **kwargs) -> TransformerConfig:
@@ -628,7 +518,7 @@ if __name__ == "__main__":
         print(f"MCore total params: {mcore_param_count}")
         print()
         
-        from transformers.models.qwen3.modeling_qwen3 import Qwen3Model, Qwen3DecoderLayer
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3Model
         print("HF Model Param Counts")
         pp(get_module_param_count(ref_model))
         qwen3_model = ref_model.model
