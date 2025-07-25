@@ -367,7 +367,11 @@ def get_gpt_model_args(hf_config: Qwen3ConfigT):
 
 # ---- Weight Conversion ---- #
 
-LAYER_NUMBER_PAT = r"decoder\.layers\.(\d+)\."
+LAYER_NUMBER_REGEX = re.compile(r"decoder\.layers\.(\d+)\.")
+EXPERT_IDX_REGEX = re.compile(r"(?<=\.weight)(\d+)$")
+
+MCORE_ATTN_PAT = "self_attention"
+MCORE_MLP_PAT = "mlp"
 TE_STATE_PAT = "_extra_state"
 
 
@@ -389,7 +393,7 @@ def remap_pp(model: torch.nn.Module | GPTModel):
     def _rename_decoder_layers(param_names: list[str]):
         name_map = {}
         for name in param_names:
-            match = re.search(LAYER_NUMBER_PAT, name)
+            match = LAYER_NUMBER_REGEX.search(name)
             if match:
                 local_layer_idx = int(match.group(1))
                 global_layer_idx = local_to_global[local_layer_idx]
@@ -442,7 +446,7 @@ def remap_param_names_for_ep_pp(model: GPTModel):
 
         name_map = {}
         for name in param_names:
-            match = re.search(LAYER_NUMBER_PAT, name)
+            match = LAYER_NUMBER_REGEX.search(name)
             if match:
                 local_layer_idx = int(match.group(1))
                 global_layer_idx = local_to_global[local_layer_idx]
@@ -622,9 +626,6 @@ def _local_to_hf(local_to_global: dict[str, str], is_moe: bool = False):
     return local_to_hf_map
 
 
-MCORE_ATTN_PAT = "self_attention"
-MCORE_MLP_PAT = "mlp"
-EXPERT_IDX_PAT = re.compile(r"(?<=\.weight)(\d+)$")
 
 def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool = False) -> dict[str, str]:
 
@@ -633,7 +634,7 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
     mlp_mapping = MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["moe"] if is_moe else MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["dense"]
 
     def _map_mlp(name: str) -> list[str]:
-        match = re.match(LAYER_NUMBER_PAT, name)
+        match = LAYER_NUMBER_REGEX.search(name)
         
         if not match:
             raise ValueError(f"MLP parameter name {name} missing layer number")
@@ -646,7 +647,7 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
                 if "expert_id" in hf_pats[0]:
                     assert is_moe
 
-                    match = EXPERT_IDX_PAT.search(name)
+                    match = EXPERT_IDX_REGEX.search(name)
                     if not match:
                         raise ValueError(f"Unable to identify expert id in {name}")
                     expert_id = int(match.group(1))
