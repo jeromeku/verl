@@ -17,6 +17,7 @@ QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
 QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
 QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
 
+
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     return {
         "tensor_model_parallel_size": mpu.get_tensor_model_parallel_world_size(),
@@ -181,3 +182,122 @@ def get_activation_recompute_config(
         "distribute_saved_activations": distribute_saved_activations,
         "recompute_modules": recompute_modules,
     }
+
+_DIRECT_MAPPING = {
+    "embedding.word_embeddings.weight": "model.embed_tokens.weight",
+    "decoder.final_layernorm.weight": "model.norm.weight",
+    "output_layer.weight": "lm_head.weight",
+}
+_ATTENTION_MAPPING = {
+    "self_attention.linear_proj.weight": [
+        "model.layers.{layer_number}.self_attn.o_proj.weight"
+    ],
+    "self_attention.linear_qkv.layer_norm_weight": [
+        "model.layers.{layer_number}.input_layernorm.weight"
+    ],
+    "self_attention.q_layernorm.weight": [
+        "model.layers.{layer_number}.self_attn.q_norm.weight"
+    ],
+    "self_attention.k_layernorm.weight": [
+        "model.layers.{layer_number}.self_attn.k_norm.weight"
+    ],
+    "self_attention.linear_qkv.weight": [
+        "model.layers.{layer_number}.self_attn.q_proj.weight",
+        "model.layers.{layer_number}.self_attn.k_proj.weight",
+        "model.layers.{layer_number}.self_attn.v_proj.weight",
+    ],
+    "self_attention.linear_qkv.bias": [
+        "model.layers.{layer_number}.self_attn.q_proj.bias",
+        "model.layers.{layer_number}.self_attn.k_proj.bias",
+        "model.layers.{layer_number}.self_attn.v_proj.bias",
+    ],
+}
+_DENSE_MLP_MAPPING = {
+    "mlp.linear_fc1.weight": [
+        "model.layers.{layer_number}.mlp.gate_proj.weight",
+        "model.layers.{layer_number}.mlp.up_proj.weight",
+    ],
+    "mlp.linear_fc1.layer_norm_weight": [
+        "model.layers.{layer_number}.post_attention_layernorm.weight"
+    ],
+    "mlp.linear_fc2.weight": ["model.layers.{layer_number}.mlp.down_proj.weight"],
+}
+_MOE_MLP_MAPPING = {
+    "shared_experts.linear_fc1.weight": [
+        "model.layers.{layer_number}.mlp.shared_expert.gate_proj.weight",
+        "model.layers.{layer_number}.mlp.shared_expert.up_proj.weight",
+    ],
+    "pre_mlp_layernorm": [
+        "model.layers.{layer_number}.post_attention_layernorm.weight"
+    ],
+    "shared_experts.linear_fc2.weight": [
+        "model.layers.{layer_number}.mlp.shared_expert.down_proj.weight"
+    ],
+    "mlp.router.weight": ["model.layers.{layer_number}.mlp.gate.weight"],
+    "shared_experts.gate_weight": [
+        "model.layers.{layer_number}.mlp.shared_expert_gate.weight"
+    ],
+    "mlp.experts.linear_fc1": [
+        "model.layers.{layer_number}.mlp.experts.{expert_id}.gate_proj.weight",
+        "model.layers.{layer_number}.mlp.experts.{expert_id}.up_proj.weight",
+    ],
+    "mlp.experts.linear_fc2": [
+        "model.layers.{layer_number}.mlp.experts.{expert_id}.down_proj.weight"
+    ],
+}
+
+
+MCORE_TO_HF_PARAM_MAPPINGS = {
+    "pre_post_decoder": {
+        "embedding.word_embeddings.weight": "model.embed_tokens.weight",
+        "decoder.final_layernorm.weight": "model.norm.weight",
+        "output_layer.weight": "lm_head.weight",
+    },
+    "attention": {
+        "self_attention.linear_proj.weight": [
+            "model.layers.{layer_number}.self_attn.o_proj.weight"
+        ],
+        "self_attention.linear_qkv.layer_norm_weight": [
+            "model.layers.{layer_number}.input_layernorm.weight"
+        ],
+        "self_attention.q_layernorm.weight": [
+            "model.layers.{layer_number}.self_attn.q_norm.weight"
+        ],
+        "self_attention.k_layernorm.weight": [
+            "model.layers.{layer_number}.self_attn.k_norm.weight"
+        ],
+        "self_attention.linear_qkv.weight": [
+            "model.layers.{layer_number}.self_attn.q_proj.weight",
+            "model.layers.{layer_number}.self_attn.k_proj.weight",
+            "model.layers.{layer_number}.self_attn.v_proj.weight",
+        ],
+        "self_attention.linear_qkv.bias": [
+            "model.layers.{layer_number}.self_attn.q_proj.bias",
+            "model.layers.{layer_number}.self_attn.k_proj.bias",
+            "model.layers.{layer_number}.self_attn.v_proj.bias",
+        ],
+    },
+    "mlp": {
+        "dense": {
+            "mlp.linear_fc1.weight": [
+                "model.layers.{layer_number}.mlp.gate_proj.weight",
+                "model.layers.{layer_number}.mlp.up_proj.weight",
+            ],
+            "mlp.linear_fc1.layer_norm_weight": [
+                "model.layers.{layer_number}.post_attention_layernorm.weight"
+            ],
+            "mlp.linear_fc2.weight": ["model.layers.{layer_number}.mlp.down_proj.weight"],
+        },
+        "moe": {
+            "pre_mlp_layernorm": ["model.layers.{layer_number}.post_attention_layernorm.weight"],
+            "mlp.router.weight": ["model.layers.{layer_number}.mlp.gate.weight"],
+            "mlp.experts.linear_fc1": [
+                "model.layers.{layer_number}.mlp.experts.{expert_id}.gate_proj.weight",
+                "model.layers.{layer_number}.mlp.experts.{expert_id}.up_proj.weight",
+            ],
+            "mlp.experts.linear_fc2": [
+                "model.layers.{layer_number}.mlp.experts.{expert_id}.down_proj.weight"
+            ],
+        },
+    },
+}

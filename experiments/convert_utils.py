@@ -523,25 +523,13 @@ def _weight_name_mapping_mcore_local_to_global(model: GPTModel) -> dict[str, str
 
     return ret
 
-
-_ATTENTION_MAPPING = {
-    "self_attention.linear_proj.weight": ["model.layers.{layer_number}.self_attn.o_proj.weight"],
-    "self_attention.linear_qkv.layer_norm_weight": [
-        "model.layers.{layer_number}.input_layernorm.weight"
-    ],
-    "self_attention.q_layernorm.weight": ["model.layers.{layer_number}.self_attn.q_norm.weight"],
-    "self_attention.k_layernorm.weight": ["model.layers.{layer_number}.self_attn.k_norm.weight"],
-    "self_attention.linear_qkv.weight": [
-        "model.layers.{layer_number}.self_attn.q_proj.weight",
-        "model.layers.{layer_number}.self_attn.k_proj.weight",
-        "model.layers.{layer_number}.self_attn.v_proj.weight",
-    ],
-    "self_attention.linear_qkv.bias": [
-        "model.layers.{layer_number}.self_attn.q_proj.bias",
-        "model.layers.{layer_number}.self_attn.k_proj.bias",
-        "model.layers.{layer_number}.self_attn.v_proj.bias",
-    ],
-}
+from qwen3_configs import (
+    _ATTENTION_MAPPING,
+    _DENSE_MLP_MAPPING,
+    _DIRECT_MAPPING,
+    _MOE_MLP_MAPPING,
+    MCORE_TO_HF_PARAM_MAPPINGS,
+)
 
 
 def _weight_name_mapping_attention(name: str) -> list[str]:
@@ -567,26 +555,7 @@ def _weight_name_mapping_attention(name: str) -> list[str]:
         raise NotImplementedError(f"Unsupported parameter name: {name}")
     return convert_names
 
-
-_MLP_MAPPING = {
-    "mlp.linear_fc1.weight": [
-        "model.layers.{layer_number}.mlp.gate_proj.weight",
-        "model.layers.{layer_number}.mlp.up_proj.weight",
-    ],
-    "mlp.linear_fc1.layer_norm_weight": [
-        "model.layers.{layer_number}.post_attention_layernorm.weight"
-    ],
-    "mlp.linear_fc2.weight": ["model.layers.{layer_number}.mlp.down_proj.weight"],
-}
-
-_DIRECT_MAPPING = {
-    "embedding.word_embeddings.weight": "model.embed_tokens.weight",
-    "decoder.final_layernorm.weight": "model.norm.weight",
-    "output_layer.weight": "lm_head.weight",
-}
-
-
-def _weight_name_mapping_mlp(name: str) -> list[str]:
+def _weight_name_mapping_mlp(name: str, is_moe: bool = False) -> list[str]:
     """
     Map MLP weight names from MCore to Hugging Face.
 
@@ -599,18 +568,29 @@ def _weight_name_mapping_mlp(name: str) -> list[str]:
     Raises:
         NotImplementedError: If the parameter name is unsupported
     """
+    mlp_mapping = _MOE_MLP_MAPPING if is_moe else _DENSE_MLP_MAPPING
     layer_number = name.split(".")[2]
     convert_names = []
-    for keyword, mapping_names in _MLP_MAPPING.items():
+    for keyword, mapping_names in mlp_mapping.items():
         if keyword in name:
-            convert_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
+            if "{expert_id}" in mapping_names[0]:
+                assert is_moe
+                expert_id = name.split("weight")[-1]
+                convert_names.extend(
+                    [
+                        x.format(layer_number=layer_number, expert_id=expert_id)
+                        for x in mapping_names
+                    ]
+                )
+            else:
+                convert_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
             break
     if len(convert_names) == 0:
         raise NotImplementedError(f"Unsupported parameter name: {name}")
     return convert_names
 
 
-def _weight_name_mapping_mcore_to_hf(mcore_weights_name: str) -> list[str]:
+def _weight_name_mapping_mcore_to_hf(mcore_weights_name: str, is_moe: bool = False) -> list[str]:
     """
     Map MCore weight names to Hugging Face weight names.
 
@@ -628,40 +608,73 @@ def _weight_name_mapping_mcore_to_hf(mcore_weights_name: str) -> list[str]:
     if "self_attention" in mcore_weights_name:
         return _weight_name_mapping_attention(mcore_weights_name)
     elif "mlp" in mcore_weights_name:
-        return _weight_name_mapping_mlp(mcore_weights_name)
+        return _weight_name_mapping_mlp(mcore_weights_name, is_moe=is_moe)
     else:
         raise NotImplementedError(f"Unsupported parameter name: {mcore_weights_name}")
 
 
-def _local_to_hf(local_to_global: dict[str, str]):
+def _local_to_hf(local_to_global: dict[str, str], is_moe: bool = False):
     local_to_hf_map = {
-        k: _weight_name_mapping_mcore_to_hf(v)
+        k: _weight_name_mapping_mcore_to_hf(v, is_moe)
         for k, v in local_to_global.items()
         if "_extra_state" not in k
     }
     return local_to_hf_map
 
 
-_CAUSAL_LM_MAPPING = {
-    "embedding.word_embeddings.weight": "model.embed_tokens.weight",
-    "decoder.final_layernorm.weight": "model.norm.weight",
-    "output_layer.weight": "lm_head.weight",
-}
-
 MCORE_ATTN_PAT = "self_attention"
 MCORE_MLP_PAT = "mlp"
+EXPERT_IDX_PAT = re.compile(r"(?<=\.weight)(\d+)$")
 
+def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool = False) -> dict[str, str]:
 
-def map_mcore_hf_param_names(local_to_global_map: dict[str, str]) -> dict[str, str]:
+    pre_post_decoder_mapping = MCORE_TO_HF_PARAM_MAPPINGS["pre_post_decoder"]
+    attention_mapping = MCORE_TO_HF_PARAM_MAPPINGS["attention"]
+    mlp_mapping = MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["moe"] if is_moe else MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["dense"]
+
+    def _map_mlp(name: str) -> list[str]:
+        match = re.match(LAYER_NUMBER_PAT, name)
+        
+        if not match:
+            raise ValueError(f"MLP parameter name {name} missing layer number")
+        
+        layer_number = int(match.group(1))
+
+        mapped_names = []
+        for mcore_pat, hf_pats in mlp_mapping.items():
+            if mcore_pat in name:
+                if "expert_id" in hf_pats[0]:
+                    assert is_moe
+
+                    match = EXPERT_IDX_PAT.search(name)
+                    if not match:
+                        raise ValueError(f"Unable to identify expert id in {name}")
+                    expert_id = int(match.group(1))
+
+                    mapped_names.extend(
+                        [
+                            pat.format(layer_number=layer_number, expert_id=expert_id)
+                            for pat in hf_pats
+                        ]
+                    )
+                else:
+                    mapped_names.extend([pat.format(layer_number=layer_number) for pat in hf_pats])
+                break
+
+        if len(mapped_names) == 0:
+            breakpoint()
+            raise ValueError(f"MLP parameter name {name} not recognized")
+        
+        return mapped_names
 
     def _mcore_to_hf(name: str) -> list[str]:
-        hf_name = _CAUSAL_LM_MAPPING.get(name, None)
+        hf_name = pre_post_decoder_mapping.get(name, None)
         
         if hf_name is None:
             if MCORE_ATTN_PAT in name:
                 hf_name = _weight_name_mapping_attention(name)
             elif MCORE_MLP_PAT in name:
-                hf_name = _weight_name_mapping_mlp(name)
+                hf_name = _map_mlp(name)
             else:
                 raise ValueError(f"Param name {name} not recognized")
         

@@ -232,11 +232,17 @@ if __name__ == "__main__":
     #     pp(map)
 
     from convert_utils import map_mcore_hf_param_names, _local_to_hf
-    
+    from megatron.core.transformer import TransformerLayer
+    gpt_model: GPTModel = unwrap_model(model_parts[0])
+    layer: TransformerLayer = gpt_model.decoder.layers[0]
+    mlp = layer.mlp
+
+    is_moe = isinstance(hf_config, Qwen3MoeConfig)
+
     for m in name_maps:
-        ref = _local_to_hf(m)
-        test = map_mcore_hf_param_names(m)
-        breakpoint()
+        ref = _local_to_hf(m, is_moe=is_moe)
+        test = map_mcore_hf_param_names(m, is_moe=is_moe)
+        
         assert ref == test
 
     if args.use_cpu_initialization:
