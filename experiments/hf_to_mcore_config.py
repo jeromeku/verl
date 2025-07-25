@@ -188,12 +188,13 @@ if __name__ == "__main__":
         use_cpu_initialization=args.use_cpu_initialization,
     )
 
-    pp(hf_config.to_dict())
-    pp(asdict(transformer_config))
+    # pp(hf_config.to_dict())
+    # pp(asdict(transformer_config))
 
     model_provider_func = get_model_provider_func(transformer_config, args)
     model_parts: list[GPTModel] = get_model(model_provider_func, init_on_meta=init_on_meta)
-    print(model_parts[0])
+   
+   # print(model_parts[0])
 
     param_devices = sum((get_model_param_devices(m) for m in model_parts), Counter())
     mcore_num_params = sum(len(list(m.parameters())) for m in model_parts)
@@ -227,19 +228,27 @@ if __name__ == "__main__":
 
         name_maps.append(test)
 
-    for map in name_maps:
-        pp(map)
+    # for map in name_maps:
+    #     pp(map)
+
+    from convert_utils import map_mcore_hf_param_names, _local_to_hf
+    
+    for m in name_maps:
+        ref = _local_to_hf(m)
+        test = map_mcore_hf_param_names(m)
+        breakpoint()
+        assert ref == test
 
     if args.use_cpu_initialization:
         from megatron.training.checkpointing import save_checkpoint, load_checkpoint
         save_checkpoint(1, model_parts, None, None, 0)
     
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-    
-    args.load = args.save
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        
+        args.load = args.save
 
-    load_checkpoint(model_parts, None, None, strict=True)
+        load_checkpoint(model_parts, None, None, strict=True)
 
     # print([type(m) for m in model_parts])
     # for idx, m in enumerate(model_parts):

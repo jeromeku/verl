@@ -47,7 +47,7 @@ def update_args(
 
     if isinstance(hf_config, Qwen3MoeConfig):
         args.num_experts = hf_config.num_experts
-        
+
     args.vocab_size = hf_config.vocab_size
     args.padded_vocab_size = args.vocab_size
     args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
@@ -173,8 +173,11 @@ def meta_device_context():
 
 def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
     if backend == "fake":
-        assert world_size is not None and rank is not None, "`world_size` and `rank` must be provided when using `fake` backend"
+        assert world_size is not None and rank is not None, (
+            "`world_size` and `rank` must be provided when using `fake` backend"
+        )
         from torch.testing._internal.distributed.fake_pg import FakeStore
+
         store = FakeStore()
         world_size = world_size
         rank = rank
@@ -183,10 +186,12 @@ def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
         world_size = -1
         rank = -1
 
-    torch.distributed.init_process_group(backend=backend, store=store, rank=rank, world_size=world_size)
+    torch.distributed.init_process_group(
+        backend=backend, store=store, rank=rank, world_size=world_size
+    )
+
 
 def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
-    
     mpu.initialize_model_parallel(
         tensor_model_parallel_size=tp,
         pipeline_model_parallel_size=pp,
@@ -194,7 +199,7 @@ def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
         context_parallel_size=cp,
         expert_model_parallel_size=ep,
         expert_tensor_parallel_size=etp,
-        create_gloo_process_groups=False
+        create_gloo_process_groups=False,
     )
     model_parallel_cuda_manual_seed(seed)
 
@@ -206,6 +211,7 @@ def get_model(
     init_on_meta: bool = True,
 ):
     args = get_args()
+
     # Build model.
     def build_model():
         if (
@@ -358,26 +364,28 @@ def get_gpt_model_args(hf_config: Qwen3ConfigT):
         "rotary_base": hf_config.rope_theta,
     }
 
+
 # ---- Weight Conversion ---- #
 
-LAYER_NUMBER_PAT = r'decoder\.layers\.(\d+)\.'
+LAYER_NUMBER_PAT = r"decoder\.layers\.(\d+)\."
 TE_STATE_PAT = "_extra_state"
+
 
 def remove_te_keys(keys: list[str]):
     return list(filter(lambda k: k.find(TE_STATE_PAT) < 0, keys))
 
+
 def remap_pp(model: torch.nn.Module | GPTModel):
     model = unwrap_model(model)
-    
+
     # Remap from pp layer shard idx -> global layer idx
     # NOTE: "layer_number" starts at 1
     local_to_global = {}
     assert hasattr(model, "decoder")
-    
+
     for idx, layer in enumerate(model.decoder.layers):
         local_to_global[idx] = layer.layer_number - 1
 
-    
     def _rename_decoder_layers(param_names: list[str]):
         name_map = {}
         for name in param_names:
@@ -389,24 +397,22 @@ def remap_pp(model: torch.nn.Module | GPTModel):
             else:
                 new_name = name
             name_map[name] = new_name
-    
+
         return name_map
-    
-    _all_param_names = [
-        k for k in model.state_dict().keys() if "_extra_state" not in k
-    ]
+
+    _all_param_names = [k for k in model.state_dict().keys() if "_extra_state" not in k]
     all_param_names = remove_te_keys(model.state_dict().keys())
     assert _all_param_names == all_param_names
 
     name_map = _rename_decoder_layers(all_param_names)
-    
+
     ret = {}
 
     for param_name in all_param_names:
         keyword = "decoder.layers."
         if keyword in param_name:
             layer_idx = int(param_name.split(keyword)[1].split(".")[0])
-            
+
             global_layer_idx = local_to_global[layer_idx]
             ret[param_name] = param_name.replace(
                 f"layers.{layer_idx}.", f"layers.{global_layer_idx}."
@@ -415,12 +421,13 @@ def remap_pp(model: torch.nn.Module | GPTModel):
             ret[param_name] = param_name
 
     assert ret == name_map
-    
+
     return name_map
 
-def remap_param_names_for_ep_pp(model:GPTModel):
+
+def remap_param_names_for_ep_pp(model: GPTModel):
     model = unwrap_model(model)
-    
+
     # Remap from pp layer shard idx -> global layer idx
     # NOTE: "layer_number" starts at 1
     assert hasattr(model, "decoder")
@@ -443,82 +450,231 @@ def remap_param_names_for_ep_pp(model:GPTModel):
             else:
                 new_name = name
             name_map[name] = new_name
-    
+
         return name_map
-    
-    def _remap_ep_layers(name_map: dict[str,str]):
+
+    def _remap_ep_layers(name_map: dict[str, str]):
         num_experts = model.config.num_moe_experts
         num_experts_per_rank = num_experts // ep_size
         local_expert_to_global_expert = {
-            i: i + num_experts_per_rank * ep_rank
-            for i in range(num_experts_per_rank)
+            i: i + num_experts_per_rank * ep_rank for i in range(num_experts_per_rank)
         }
         for k in name_map.keys():
             v = name_map[k]
             if ".mlp.experts.linear_fc" in v:
                 name_prefix, local_expert_id = v.split(".weight")
-                global_expert_idx = local_expert_to_global_expert[
-                    int(local_expert_id)
-                ]
+                global_expert_idx = local_expert_to_global_expert[int(local_expert_id)]
                 name_map[k] = f"{name_prefix}.weight{global_expert_idx}"
 
     all_param_names = remove_te_keys(model.state_dict().keys())
-    name_map = _remap_pp_layers(all_param_names)    
+    name_map = _remap_pp_layers(all_param_names)
 
     if ep_size > 1:
         _remap_ep_layers(name_map)
-    
+
     return name_map
-        
+
+
 def _weight_name_mapping_mcore_local_to_global(model: GPTModel) -> dict[str, str]:
-        """
-        Map local weight names to global weight names, supporting VPP and EP.
+    """
+    Map local weight names to global weight names, supporting VPP and EP.
 
-        Args:
-            model: The model instance
+    Args:
+        model: The model instance
 
-        Returns:
-            dict: Mapping from local weight names to global weight names
-        """
-        # vpp
-        local_layer_to_global_layer = {}
-        model = unwrap_model(model)
-        if hasattr(model, "decoder"):
-            for idx, layer in enumerate(model.decoder.layers):
-                local_layer_to_global_layer[idx] = layer.layer_number - 1
-        all_param_names = [
-            k for k in model.state_dict().keys() if "_extra_state" not in k
-        ]
-        ret = {}
-        for param_name in all_param_names:
-            keyword = "decoder.layers."
-            if keyword in param_name:
-                layer_idx = int(param_name.split(keyword)[1].split(".")[0])
-                global_layer_idx = local_layer_to_global_layer[layer_idx]
-                ret[param_name] = param_name.replace(
-                    f"layers.{layer_idx}.", f"layers.{global_layer_idx}."
-                )
+    Returns:
+        dict: Mapping from local weight names to global weight names
+    """
+    # vpp
+    local_layer_to_global_layer = {}
+    model = unwrap_model(model)
+    if hasattr(model, "decoder"):
+        for idx, layer in enumerate(model.decoder.layers):
+            local_layer_to_global_layer[idx] = layer.layer_number - 1
+    all_param_names = [k for k in model.state_dict().keys() if "_extra_state" not in k]
+    ret = {}
+    for param_name in all_param_names:
+        keyword = "decoder.layers."
+        if keyword in param_name:
+            layer_idx = int(param_name.split(keyword)[1].split(".")[0])
+            global_layer_idx = local_layer_to_global_layer[layer_idx]
+            ret[param_name] = param_name.replace(
+                f"layers.{layer_idx}.", f"layers.{global_layer_idx}."
+            )
+        else:
+            ret[param_name] = param_name
+
+    # ep
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    ep_rank = mpu.get_expert_model_parallel_rank()
+
+    if ep_size > 1:
+        num_experts = model.config.num_moe_experts
+        num_experts_per_rank = num_experts // ep_size
+        local_expert_to_global_expert = {
+            i: i + num_experts_per_rank * ep_rank for i in range(num_experts_per_rank)
+        }
+        for k in ret.keys():
+            v = ret[k]
+            if ".mlp.experts.linear_fc" in v:
+                name_prefix, local_expert_id = v.split(".weight")
+                global_expert_idx = local_expert_to_global_expert[int(local_expert_id)]
+                ret[k] = f"{name_prefix}.weight{global_expert_idx}"
+
+    return ret
+
+
+_ATTENTION_MAPPING = {
+    "self_attention.linear_proj.weight": ["model.layers.{layer_number}.self_attn.o_proj.weight"],
+    "self_attention.linear_qkv.layer_norm_weight": [
+        "model.layers.{layer_number}.input_layernorm.weight"
+    ],
+    "self_attention.q_layernorm.weight": ["model.layers.{layer_number}.self_attn.q_norm.weight"],
+    "self_attention.k_layernorm.weight": ["model.layers.{layer_number}.self_attn.k_norm.weight"],
+    "self_attention.linear_qkv.weight": [
+        "model.layers.{layer_number}.self_attn.q_proj.weight",
+        "model.layers.{layer_number}.self_attn.k_proj.weight",
+        "model.layers.{layer_number}.self_attn.v_proj.weight",
+    ],
+    "self_attention.linear_qkv.bias": [
+        "model.layers.{layer_number}.self_attn.q_proj.bias",
+        "model.layers.{layer_number}.self_attn.k_proj.bias",
+        "model.layers.{layer_number}.self_attn.v_proj.bias",
+    ],
+}
+
+
+def _weight_name_mapping_attention(name: str) -> list[str]:
+    """
+    Map attention weight names from MCore to Hugging Face.
+
+    Args:
+        name: MCore weight name
+
+    Returns:
+        list: Corresponding Hugging Face weight names
+
+    Raises:
+        NotImplementedError: If the parameter name is unsupported
+    """
+    layer_number = name.split(".")[2]
+    convert_names = []
+    for keyword, mapping_names in _ATTENTION_MAPPING.items():
+        if keyword in name:
+            convert_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
+            break
+    if len(convert_names) == 0:
+        raise NotImplementedError(f"Unsupported parameter name: {name}")
+    return convert_names
+
+
+_MLP_MAPPING = {
+    "mlp.linear_fc1.weight": [
+        "model.layers.{layer_number}.mlp.gate_proj.weight",
+        "model.layers.{layer_number}.mlp.up_proj.weight",
+    ],
+    "mlp.linear_fc1.layer_norm_weight": [
+        "model.layers.{layer_number}.post_attention_layernorm.weight"
+    ],
+    "mlp.linear_fc2.weight": ["model.layers.{layer_number}.mlp.down_proj.weight"],
+}
+
+_DIRECT_MAPPING = {
+    "embedding.word_embeddings.weight": "model.embed_tokens.weight",
+    "decoder.final_layernorm.weight": "model.norm.weight",
+    "output_layer.weight": "lm_head.weight",
+}
+
+
+def _weight_name_mapping_mlp(name: str) -> list[str]:
+    """
+    Map MLP weight names from MCore to Hugging Face.
+
+    Args:
+        name: MCore weight name
+
+    Returns:
+        list: Corresponding Hugging Face weight names
+
+    Raises:
+        NotImplementedError: If the parameter name is unsupported
+    """
+    layer_number = name.split(".")[2]
+    convert_names = []
+    for keyword, mapping_names in _MLP_MAPPING.items():
+        if keyword in name:
+            convert_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
+            break
+    if len(convert_names) == 0:
+        raise NotImplementedError(f"Unsupported parameter name: {name}")
+    return convert_names
+
+
+def _weight_name_mapping_mcore_to_hf(mcore_weights_name: str) -> list[str]:
+    """
+    Map MCore weight names to Hugging Face weight names.
+
+    Args:
+        mcore_weights_name: MCore weight name
+
+    Returns:
+        list: Corresponding Hugging Face weight names
+    """
+    assert "_extra_state" not in mcore_weights_name, "extra_state should not be loaded"
+
+    if mcore_weights_name in _DIRECT_MAPPING:
+        return [_DIRECT_MAPPING[mcore_weights_name]]
+
+    if "self_attention" in mcore_weights_name:
+        return _weight_name_mapping_attention(mcore_weights_name)
+    elif "mlp" in mcore_weights_name:
+        return _weight_name_mapping_mlp(mcore_weights_name)
+    else:
+        raise NotImplementedError(f"Unsupported parameter name: {mcore_weights_name}")
+
+
+def _local_to_hf(local_to_global: dict[str, str]):
+    local_to_hf_map = {
+        k: _weight_name_mapping_mcore_to_hf(v)
+        for k, v in local_to_global.items()
+        if "_extra_state" not in k
+    }
+    return local_to_hf_map
+
+
+_CAUSAL_LM_MAPPING = {
+    "embedding.word_embeddings.weight": "model.embed_tokens.weight",
+    "decoder.final_layernorm.weight": "model.norm.weight",
+    "output_layer.weight": "lm_head.weight",
+}
+
+MCORE_ATTN_PAT = "self_attention"
+MCORE_MLP_PAT = "mlp"
+
+
+def map_mcore_hf_param_names(local_to_global_map: dict[str, str]) -> dict[str, str]:
+
+    def _mcore_to_hf(name: str) -> list[str]:
+        hf_name = _CAUSAL_LM_MAPPING.get(name, None)
+        
+        if hf_name is None:
+            if MCORE_ATTN_PAT in name:
+                hf_name = _weight_name_mapping_attention(name)
+            elif MCORE_MLP_PAT in name:
+                hf_name = _weight_name_mapping_mlp(name)
             else:
-                ret[param_name] = param_name
+                raise ValueError(f"Param name {name} not recognized")
+        
+        # Return list[str] since mcore param could map to multiple hf params
+        if not isinstance(hf_name, list):
+            hf_name = [hf_name]
+        
+        return hf_name
 
-        # ep
-        ep_size = mpu.get_expert_model_parallel_world_size()
-        ep_rank = mpu.get_expert_model_parallel_rank()
+    local_to_hf_map = {
+        k: _mcore_to_hf(local_to_global_map[k]) for k in remove_te_keys(local_to_global_map.keys())
+    }
 
-        if ep_size > 1:
-            num_experts = model.config.num_moe_experts
-            num_experts_per_rank = num_experts // ep_size
-            local_expert_to_global_expert = {
-                i: i + num_experts_per_rank * ep_rank
-                for i in range(num_experts_per_rank)
-            }
-            for k in ret.keys():
-                v = ret[k]
-                if ".mlp.experts.linear_fc" in v:
-                    name_prefix, local_expert_id = v.split(".weight")
-                    global_expert_idx = local_expert_to_global_expert[
-                        int(local_expert_id)
-                    ]
-                    ret[k] = f"{name_prefix}.weight{global_expert_idx}"
+    return local_to_hf_map
 
-        return ret
+    # 3 categories of params: embeddings / final norm / output_layer, attn, and mlp
