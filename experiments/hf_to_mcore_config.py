@@ -153,6 +153,7 @@ def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
         context_parallel_size=cp,
         expert_model_parallel_size=ep,
         expert_tensor_parallel_size=etp,
+        create_gloo_process_groups=False
     )
     model_parallel_cuda_manual_seed(seed)
 
@@ -516,7 +517,7 @@ def update_args(
     args.hidden_size = hf_config.hidden_size
     args.num_attention_heads = hf_config.num_attention_heads
     args.seq_length = hf_config.max_position_embeddings
-    
+
     args.vocab_size = hf_config.vocab_size
     args.padded_vocab_size = args.vocab_size
     args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
@@ -622,17 +623,24 @@ if __name__ == "__main__":
     model_provider_func = get_model_provider_func(transformer_config, args)
     model_parts: list[GPTModel] = get_model(model_provider_func, init_on_meta=init_on_meta)
     print(model_parts[0])
-    param_devices = get_model_param_devices(model_parts[0])
-    
-    if init_on_meta:
-        assert param_devices['meta'] == sum(len(list(m.parameters())) for m in model_parts)
+
+    param_devices = sum((get_model_param_devices(m) for m in model_parts), Counter())
+    mcore_num_params = sum(len(list(m.parameters())) for m in model_parts)
+
+    if init_on_meta and not param_devices['meta'] == mcore_num_params:
+        print(f"WARNING: not all params on 'meta': {param_devices}")
 
     with torch.device('meta'):
         ref_model: Qwen3ForCausalLM = model_cls(hf_config)
     
     hf_param_count = get_total_params(ref_model)
     mcore_param_count = sum(get_total_params(m) for m in model_parts)
-    assert hf_param_count == mcore_param_count, f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
+
+    # TODO: better checks for various parallelisms
+    # Param accounting gets complicated with tied weights, pipeline parallel
+    breakpoint()
+    if torch.distributed.get_world_size() == 1:
+        assert hf_param_count == mcore_param_count, f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
     
     from weight_converter import remap_pp
     for m in model_parts:

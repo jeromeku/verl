@@ -59,7 +59,8 @@ def remap_pp(model: torch.nn.Module | GPTModel):
             ret[param_name] = param_name
     breakpoint()
     assert len(ret) == len(name_map)
-
+    assert ret == name_map
+    
     return ret, name_map
 
 def _weight_name_mapping_mcore_local_to_global(
