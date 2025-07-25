@@ -131,9 +131,21 @@ def meta_device_context():
             yield
 
 
-def init_distributed(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
-    torch.distributed.init_process_group("nccl")
+def init_distributed(backend="nccl"):
+    if backend == "fake":
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+        store = FakeStore()
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        rank = 0
+    else:
+        store = None
+        world_size = -1
+        rank = -1
 
+    torch.distributed.init_process_group(backend=backend, store=store, rank=rank, world_size=world_size)
+
+def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
+    
     mpu.initialize_model_parallel(
         tensor_model_parallel_size=tp,
         pipeline_model_parallel_size=pp,
@@ -497,14 +509,24 @@ def update_args(
     use_transformer_engine: bool = True,
     **kwargs,
 ):
+    
+    # Required args for MCore args validation
+    args.max_position_embeddings = hf_config.max_position_embeddings
+    args.num_layers = hf_config.num_hidden_layers
+    args.hidden_size = hf_config.hidden_size
+    args.num_attention_heads = hf_config.num_attention_heads
+    args.seq_length = hf_config.max_position_embeddings
+    
     args.vocab_size = hf_config.vocab_size
     args.padded_vocab_size = args.vocab_size
-    args.max_position_embeddings = hf_config.max_position_embeddings
     args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
     args.position_embedding_type = "rope"
     args.rotary_percent = 1.0
     args.rotary_base = hf_config.rope_theta
     args.rope_scaling = True if hf_config.rope_scaling is not None else False
+
+    args.rank = torch.distributed.get_rank()
+    args.world_size = torch.distributed.get_world_size()
 
     # Should TE for optimized parallel linear, attn, and moe grouped linear
     args.transformer_impl = "transformer_engine" if use_transformer_engine else "local"
@@ -552,6 +574,7 @@ if __name__ == "__main__":
         default=QWEN3_30B_3B,
         choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
     )
+    parser.add_argument("--backend", default="fake", choices=["fake", "gloo", "nccl"])
 
     add_megatron_arguments(parser)
     args = parser.parse_args()
@@ -561,10 +584,15 @@ if __name__ == "__main__":
     model_cls = Qwen3MoeForCausalLM if is_moe else Qwen3ForCausalLM
     hf_config = AutoConfig.from_pretrained(model_path)
     
+    init_distributed(backend=args.backend)
     args = update_args(args, hf_config, use_transformer_engine=True)
-    args = set_vpp_size(hf_config, args)
+    validate_args(args)
+    
+    breakpoint()
 
-    init_distributed(
+    #args = set_vpp_size(hf_config, args)
+
+    init_mpu(
         tp=args.tensor_model_parallel_size,
         pp=args.pipeline_model_parallel_size,
         vpp=args.virtual_pipeline_model_parallel_size,
