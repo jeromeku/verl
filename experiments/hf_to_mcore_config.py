@@ -142,7 +142,7 @@ if __name__ == "__main__":
         "--model-id",
         help="HF model path, e.g., Qwen/Qwen3-30B-A3B",
         default=QWEN3_600M,
-        choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
+      #  choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
     )
     parser.add_argument("--backend", default="fake", choices=["fake", "gloo", "nccl"])
     parser.add_argument("--rank", default=None, type=int)
@@ -152,10 +152,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     model_path = args.model_id
-    is_moe = model_path in QWEN3_MOE_MODELS
+    is_moe = model_path in QWEN3_MOE_MODELS or "moe" in model_path.lower()
     model_cls = Qwen3MoeForCausalLM if is_moe else Qwen3ForCausalLM
     hf_config = AutoConfig.from_pretrained(model_path)
-
+    breakpoint()
+    
     init_distributed(backend=args.backend, world_size=args.world_size, rank=args.rank)
     args = update_args(args, hf_config, use_transformer_engine=True)
     args = validate_args(args)
@@ -239,11 +240,21 @@ if __name__ == "__main__":
 
     is_moe = isinstance(hf_config, Qwen3MoeConfig)
 
+    local_to_hf_maps = []
     for m in name_maps:
         ref = _local_to_hf(m, is_moe=is_moe)
         test = map_mcore_hf_param_names(m, is_moe=is_moe)
         
         assert ref == test
+        local_to_hf_maps.append(test)
+    
+    from mbridge.core.safetensor_io import SafeTensorIO
+    is_local_dir = not model_path in [*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS]
+    if not is_local_dir:
+        from huggingface_hub import snapshot_download
+        model_cache_dir = snapshot_download(model_path)
+    else:
+        model_cache_dir = model_path
 
     if args.use_cpu_initialization:
         from megatron.training.checkpointing import save_checkpoint, load_checkpoint

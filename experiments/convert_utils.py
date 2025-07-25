@@ -841,13 +841,15 @@ def _load_hf_weights(
     etp_size = mpu.get_expert_tensor_parallel_world_size()
 
     to_load_from_disk = []
+    load_from_disk = not scatter_weights
+
     for local_name, hf_names in local_to_hf_map.items():
         if ".mlp.experts.linear_fc" in local_name:
-            should_load = not scatter_weights or (scatter_weights and etp_rank == 0)
+            should_load = load_from_disk or (scatter_weights and etp_rank == 0)
             if should_load:
                 to_load_from_disk.extend(hf_names)
         else:
-            should_load = not scatter_weights or (scatter_weights and tp_rank == 0)
+            should_load = load_from_disk or (scatter_weights and tp_rank == 0)
             if should_load:
                 to_load_from_disk.extend(hf_names)
             else:
@@ -881,7 +883,7 @@ def _load_hf_weights(
 
         if ".mlp.experts.linear_fc" in local_name:
             # split mcore weights across etp
-            should_load = not scatter_weights or (scatter_weights and etp_rank == 0)
+            should_load = load_from_disk or (scatter_weights and etp_rank == 0)
             if should_load:
                 mcore_weights_tp_split = _weight_split_across_tp(
                     local_name, mcore_weight, param, etp_size
@@ -899,7 +901,7 @@ def _load_hf_weights(
                     group=etp_group,
                 )
         else:
-            should_load = not scatter_weights or (scatter_weights and tp_rank == 0)
+            should_load = load_from_disk or (scatter_weights and tp_rank == 0)
             # split mcore weights across tp
             if should_load:
                 mcore_weights_tp_split = _weight_split_across_tp(
