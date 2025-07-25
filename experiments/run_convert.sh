@@ -9,7 +9,7 @@ MODEL_ID="${QWEN3_MOE}"
 TP=1
 PP=1
 CP=1
-EP=2
+EP=1
 ETP=1
 VPP_SIZE=None
 

@@ -527,6 +527,7 @@ def _weight_name_mapping_mcore_local_to_global(model: GPTModel) -> dict[str, str
 
     return ret
 
+
 from qwen3_configs import (
     _ATTENTION_MAPPING,
     _DENSE_MLP_MAPPING,
@@ -559,22 +560,46 @@ def _weight_name_mapping_attention(name: str) -> list[str]:
         raise NotImplementedError(f"Unsupported parameter name: {name}")
     return convert_names
 
+
+# def _weight_name_mapping_mlp(name: str, is_moe: bool = False) -> list[str]:
+#     """
+#     Map MLP weight names from MCore to Hugging Face.
+
+#     Args:
+#         name: MCore weight name
+
+#     Returns:
+#         list: Corresponding Hugging Face weight names
+
+#     Raises:
+#         NotImplementedError: If the parameter name is unsupported
+#     """
+#     mlp_mapping = _MOE_MLP_MAPPING if is_moe else _DENSE_MLP_MAPPING
+#     layer_number = name.split(".")[2]
+#     convert_names = []
+#     for keyword, mapping_names in mlp_mapping.items():
+#         if keyword in name:
+#             if "{expert_id}" in mapping_names[0]:
+#                 assert is_moe
+#                 expert_id = name.split("weight")[-1]
+#                 convert_names.extend(
+#                     [
+#                         x.format(layer_number=layer_number, expert_id=expert_id)
+#                         for x in mapping_names
+#                     ]
+#                 )
+#             else:
+#                 convert_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
+#             break
+#     if len(convert_names) == 0:
+#         raise NotImplementedError(f"Unsupported parameter name: {name}")
+#     return convert_names
+
+
 def _weight_name_mapping_mlp(name: str, is_moe: bool = False) -> list[str]:
-    """
-    Map MLP weight names from MCore to Hugging Face.
-
-    Args:
-        name: MCore weight name
-
-    Returns:
-        list: Corresponding Hugging Face weight names
-
-    Raises:
-        NotImplementedError: If the parameter name is unsupported
-    """
-    mlp_mapping = _MOE_MLP_MAPPING if is_moe else _DENSE_MLP_MAPPING
     layer_number = name.split(".")[2]
     convert_names = []
+    mlp_mapping = _MOE_MLP_MAPPING if is_moe else _DENSE_MLP_MAPPING
     for keyword, mapping_names in mlp_mapping.items():
         if keyword in name:
             if "{expert_id}" in mapping_names[0]:
@@ -625,9 +650,10 @@ def _local_to_hf(local_to_global: dict[str, str], is_moe: bool = False):
     }
     return local_to_hf_map
 
+
 def _extract_layer_number(name: str):
     match = LAYER_NUMBER_REGEX.search(name)
-    
+
     if not match:
         raise ValueError(f"Could not identify layer number in {name}")
 
@@ -635,11 +661,17 @@ def _extract_layer_number(name: str):
 
     return layer_number
 
-def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool = False) -> dict[str, str]:
 
+def map_mcore_hf_param_names(
+    local_to_global_map: dict[str, str], is_moe: bool = False
+) -> dict[str, str]:
     pre_post_decoder_mapping = MCORE_TO_HF_PARAM_MAPPINGS["pre_post_decoder"]
     attention_mapping = MCORE_TO_HF_PARAM_MAPPINGS["attention"]
-    mlp_mapping = MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["moe"] if is_moe else MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["dense"]
+    mlp_mapping = (
+        MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["moe"]
+        if is_moe
+        else MCORE_TO_HF_PARAM_MAPPINGS["mlp"]["dense"]
+    )
 
     def _map_attn(name: str) -> list[str]:
         layer_number = _extract_layer_number(name)
@@ -649,10 +681,10 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
             if keyword in name:
                 mapped_names.extend([x.format(layer_number=layer_number) for x in mapping_names])
                 break
-        
+
         if len(mapped_names) == 0:
             raise ValueError(f"Attention parameter name {name} not recognized")
-        
+
         return mapped_names
 
     def _map_mlp(name: str) -> list[str]:
@@ -682,12 +714,12 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
         if len(mapped_names) == 0:
             breakpoint()
             raise ValueError(f"MLP parameter name {name} not recognized")
-        
+
         return mapped_names
 
     def _mcore_to_hf(name: str) -> list[str]:
         hf_name = pre_post_decoder_mapping.get(name, None)
-        
+
         if hf_name is None:
             if MCORE_ATTN_PAT in name:
                 hf_name = _map_attn(name)
@@ -695,11 +727,11 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
                 hf_name = _map_mlp(name)
             else:
                 raise ValueError(f"Param name {name} not recognized")
-        
+
         # Return list[str] since mcore param could map to multiple hf params
         if not isinstance(hf_name, list):
             hf_name = [hf_name]
-        
+
         return hf_name
 
     local_to_hf_map = {
@@ -709,3 +741,181 @@ def map_mcore_hf_param_names(local_to_global_map: dict[str, str], is_moe: bool =
     return local_to_hf_map
 
     # 3 categories of params: embeddings / final norm / output_layer, attn, and mlp
+
+
+def _weight_to_mcore_format(hf_config, mcore_weights_name: str, hf_weights: list[torch.Tensor]
+) -> torch.Tensor:
+    if len(hf_weights) == 1:
+        return hf_weights[0]
+    if (
+        "self_attention.linear_qkv." in mcore_weights_name
+        and "layer_norm" not in mcore_weights_name
+    ):
+        # merge qkv
+        assert len(hf_weights) == 3
+        num_key_value_heads = hf_config.num_key_value_heads
+        hidden_dim = hf_config.hidden_size
+        num_attention_heads = hf_config.num_attention_heads
+        head_dim = getattr(
+            hf_config, "head_dim", hidden_dim // num_attention_heads
+        )
+        group_dim = head_dim * num_attention_heads // num_key_value_heads
+        q, k, v = hf_weights
+        # q k v might be tp split
+        real_num_key_value_heads = q.shape[0] // group_dim
+        q = q.view(
+            [
+                real_num_key_value_heads,
+                group_dim,
+                -1,
+            ]
+        )
+        k = k.view([real_num_key_value_heads, head_dim, -1])
+        v = v.view([real_num_key_value_heads, head_dim, -1])
+        out_shape = [-1, hidden_dim] if ".bias" not in mcore_weights_name else [-1]
+
+        qkv = torch.cat([q, k, v], dim=1).view(*out_shape).contiguous()
+        return qkv
+    elif (
+        "linear_fc1.weight" in mcore_weights_name
+        or "linear_fc1.bias" in mcore_weights_name
+    ):
+        # merge gate_proj and up_proj
+        assert len(hf_weights) == 2
+        gate, up = hf_weights
+        return torch.cat([gate, up], dim=0)
+    
+    raise NotImplementedError(f"Unsupported parameter name: {mcore_weights_name}")
+
+def _weight_split_across_tp(
+    mcore_weights_name: str,
+    mcore_weights: torch.Tensor,
+    param: torch.Tensor,
+    tp_split_size: int,
+) -> list[torch.Tensor]:
+    if tp_split_size == 1:
+        return [mcore_weights]
+
+    if (
+        "self_attention.linear_qkv." in mcore_weights_name
+        and "layer_norm" not in mcore_weights_name
+    ):
+        return mcore_weights.chunk(tp_split_size)
+    elif (
+        "linear_fc1.weight" in mcore_weights_name
+        or "linear_fc1.bias" in mcore_weights_name
+    ):
+        gate, up = mcore_weights.chunk(2)
+        gates = gate.chunk(tp_split_size)
+        ups = up.chunk(tp_split_size)
+        ret = [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
+    elif "mlp.experts.linear_fc2.weight" in mcore_weights_name:  # moe
+        ret = mcore_weights.chunk(tp_split_size, dim=1)
+    else:
+        if param.shape == mcore_weights.shape:
+            return [mcore_weights for _ in range(tp_split_size)]
+        assert len(param.shape) == len(mcore_weights.shape)
+        for partition_dim, (s1, s2) in enumerate(
+            zip(param.shape, mcore_weights.shape)
+        ):
+            if s1 != s2:
+                break
+
+        ret = mcore_weights.chunk(tp_split_size, dim=partition_dim)
+    return ret
+
+def _load_hf_weights(
+    safetensor_io,
+    hf_config: Qwen3ConfigT,
+    model: GPTModel,
+    local_to_hf_map: dict[str, str],
+    scatter_weights: bool = False,
+    memory_efficient: bool = False,
+):
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    tp_group = mpu.get_tensor_model_parallel_group()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+
+    etp_rank = mpu.get_expert_tensor_parallel_rank()
+    etp_group = mpu.get_expert_tensor_parallel_group()
+    etp_size = mpu.get_expert_tensor_parallel_world_size()
+
+    to_load_from_disk = []
+    for local_name, hf_names in local_to_hf_map.items():
+        if ".mlp.experts.linear_fc" in local_name:
+            should_load = not scatter_weights or (scatter_weights and etp_rank == 0)
+            if should_load:
+                to_load_from_disk.extend(hf_names)
+        else:
+            should_load = not scatter_weights or (scatter_weights and tp_rank == 0)
+            if should_load:
+                to_load_from_disk.extend(hf_names)
+            else:
+                # special case for lm_head.weight
+                # if make value model, every tp rank will load lm_head.weight
+                if "lm_head.weight" in hf_names:
+                    to_load_from_disk.extend(hf_names)
+
+    # load huggingface weights
+    if not memory_efficient:
+        hf_weights_map = safetensor_io.load_some_hf_weight(to_load_from_disk)
+
+    # import mcore weights
+    for local_name, hf_names in local_to_hf_map.items():
+        param = model.state_dict()[local_name]
+        # hf format to mcore format
+        if set(to_load_from_disk) & set(hf_names):
+            if not memory_efficient:
+                hf_weights = [hf_weights_map[x] for x in hf_names]
+            else:
+                hf_weights = [safetensor_io.load_one_hf_weight(x) for x in hf_names]
+            mcore_weight = _weight_to_mcore_format(hf_config, local_name, hf_weights)
+        else:
+            mcore_weight = None
+        if hf_names[0] == "lm_head.weight":
+            if param.shape[0] == 1 and mcore_weight.shape[0] != 1:
+                # skip lm_head.weight when the model is a value model
+                continue
+
+        param_to_load = torch.empty_like(param)
+
+        if ".mlp.experts.linear_fc" in local_name:
+            # split mcore weights across etp
+            should_load = not scatter_weights or (scatter_weights and etp_rank == 0)
+            if should_load:
+                mcore_weights_tp_split = _weight_split_across_tp(
+                    local_name, mcore_weight, param, etp_size
+                )
+                mcore_weights_tp_split = list(mcore_weights_tp_split)
+                mcore_weights_tp_split = [t.to(param.device) for t in mcore_weights_tp_split]
+            else:
+                mcore_weights_tp_split = None
+
+            if scatter_weights:
+                torch.distributed.scatter(
+                    param_to_load,
+                    mcore_weights_tp_split,
+                    src=torch.distributed.get_global_rank(etp_group, 0),
+                    group=etp_group,
+                )
+        else:
+            should_load = not scatter_weights or (scatter_weights and tp_rank == 0)
+            # split mcore weights across tp
+            if should_load:
+                mcore_weights_tp_split = _weight_split_across_tp(
+                    local_name, mcore_weight, param, tp_size
+                )
+                mcore_weights_tp_split = list(mcore_weights_tp_split)
+                mcore_weights_tp_split = [t.to(param.device) for t in mcore_weights_tp_split]
+            else:
+                mcore_weights_tp_split = None
+
+            if scatter_weights:
+                torch.distributed.scatter(
+                    param_to_load,
+                    mcore_weights_tp_split,
+                    src=torch.distributed.get_global_rank(tp_group, 0),
+                    group=tp_group,
+                )
+        # load
+        param.copy_(param_to_load)
