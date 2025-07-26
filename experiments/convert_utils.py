@@ -1056,24 +1056,28 @@ def load_hf_weights(
         is_fc2 = MCORE_MLP_FC2_PAT in name
 
         if is_qkv:
-            ret = src_param_mcore.chunk(tp_size)
+            sharded_weights = src_param_mcore.chunk(tp_size)
         elif is_fc1:
             gate, up = src_param_mcore.chunk(2)
             gates = gate.chunk(tp_size)
             ups = up.chunk(tp_size)
-            ret = [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
+            sharded_weights = [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
         elif is_fc2:
-            ret = src_param_mcore.chunk(tp_size, dim=1)
+            sharded_weights = src_param_mcore.chunk(tp_size, dim=1)
         else:
-            # 1D case
+            # Remaining non-attn and non-mlp cases
+            
+            # Replicated params
             if param_to_load.shape == src_param_mcore.shape:
-                return [src_param_mcore for _ in range(tp_size)]
-            assert len(param_to_load.shape) == len(src_param_mcore.shape)
-
-            # account for any other sharded params
-            partition_dim = _find_partition_dim(param_to_load.shape, src_param_mcore.shape)
-            ret = src_param_mcore.chunk(tp_size, dim=partition_dim)
-        return ret
+                sharded_weights = [src_param_mcore for _ in range(tp_size)]
+            else:
+                # Misc
+                # TODO: more robust checking for this case
+                assert len(param_to_load.shape) == len(src_param_mcore.shape)
+                partition_dim = _find_partition_dim(param_to_load.shape, src_param_mcore.shape)
+                sharded_weights = src_param_mcore.chunk(tp_size, dim=partition_dim)
+        
+        return sharded_weights
 
     for local_name, hf_names in local_to_hf_map.items():
         param_to_load = model.state_dict()[local_name]
