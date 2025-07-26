@@ -133,6 +133,93 @@ def get_total_params(model: torch.nn.Module):
 def get_module_param_count(model: torch.nn.Module):
     return {n: get_total_params(m) for n, m in model.named_children()}
 
+def check_params(ref_model, test_model):
+    import torch.distributed as dist
+    import torch.distributed.distributed_c10d as c10d
+    import torch.distributed.collective_utils as collectives
+    import torch.distributed._functional_collectives as funcol
+    from convert_utils import dist_print, _extract_layer_number
+    from megatron.core.tensor_parallel.layers import _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS
+
+    hf_param_count = get_total_params(ref_model)
+    mcore_param_count = sum(get_total_params(m) for m in test_model)
+
+    dist_print(f"mcore param count: {mcore_param_count}")
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    wg = c10d._get_default_group()
+    mcore_param_counts = [None] * world_size
+
+    dist.all_gather_object(mcore_param_counts, mcore_param_count)
+    total_params = sum(mcore_param_counts)
+
+    dist_print(mcore_param_counts, rank0_only=True)
+    dist_print(f"{hf_param_count=} {total_params=}", rank0_only=True)
+    etp_size = mpu.get_expert_tensor_parallel_world_size() 
+    tp_size =  mpu.get_tensor_model_parallel_world_size()
+    
+    if rank == 0:
+        print(f"{etp_size=} {tp_size=}")
+        param_count = 0
+        causal_lm_params = {}
+        attn_params = {}
+        mlp_params = {}
+        other_params = {}
+        for m in test_model:
+            m: GPTModel = unwrap_model(m)
+            for name, param in m.named_parameters():
+                param_attr = {
+                    "tp": param.tensor_model_parallel,
+                    "numel": param.numel(),
+                    "shape": param.shape,
+                }
+                if "decoder" not in name:
+                    causal_lm_params[name] = param_attr
+                elif "attention" in name:
+                    attn_params[name] = param_attr
+                elif "mlp." in name:
+                    mlp_params[name] = param_attr
+                else:
+                    other_params[name] = param_attr
+            
+                if param.tensor_model_parallel:
+                    group_size = etp_size if "mlp" in name else tp_size
+                    param_count += param.numel() * group_size
+                else:
+                    param_count += param.numel()
+            
+            hf_params = {
+                "other": {n: {"numel": p.numel(), "shape": p.shape} for n,p in ref_model.named_parameters() if ("attn" not in n and "mlp" not in n)},
+                "attn": {n: {"numel": p.numel(), "shape": p.shape} for n, p in ref_model.named_parameters() if "attn" in n},
+                "mlp": {n: {"numel": p.numel(), "shape": p.shape} for n, p in ref_model.named_parameters() if "mlp" in n},
+            }
+            breakpoint()
+def get_param_shape_and_numel(param: torch.nn.Parameter):
+    return { "shape": param.shape, "numel": param.numel() }
+
+def _get_model_param_by_pattern(model_parts: list[torch.nn.Module], pat: str):
+    param_attr = {}
+    for m in model_parts:
+        for name, param in m.named_parameters():
+            if pat in name:
+                param_attr[name] = get_param_shape_and_numel(param)
+
+    return param_attr
+
+def get_attn_params(model_parts: list[torch.nn.Module]):
+    return _get_model_param_by_pattern(model_parts, "attn")
+
+def get_mlp_params(model_parts: list[torch.nn.Module]):
+    experts, router, other = {}, {}, {}
+    base = _get_model_param_by_pattern(model_parts, "mlp")
+    for k, v in base.items():
+        if "experts" in k:
+            experts[k] = v
+        elif "router" in k:
+            router[k] = v
+        else:
+            other[k] = v
+    return v
 
 def main(args):
     model_path = args.model_id
@@ -186,71 +273,6 @@ def main(args):
     hf_param_count = get_total_params(ref_model)
     mcore_param_count = sum(get_total_params(m) for m in model_parts)
 
-    import torch.distributed as dist
-    import torch.distributed.distributed_c10d as c10d
-    import torch.distributed.collective_utils as collectives
-    import torch.distributed._functional_collectives as funcol
-    from convert_utils import dist_print, _extract_layer_number
-    from megatron.core.tensor_parallel.layers import _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS
-
-    dist_print(f"mcore param count: {mcore_param_count}")
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
-    wg = c10d._get_default_group()
-    mcore_param_counts = [None] * world_size
-
-    dist.all_gather_object(mcore_param_counts, mcore_param_count)
-    total_params = sum(mcore_param_counts)
-
-    dist_print(mcore_param_counts, rank0_only=True)
-    dist_print(f"{hf_param_count=} {total_params=}", rank0_only=True)
-    etp_size = mpu.get_expert_tensor_parallel_world_size() 
-    tp_size =  mpu.get_tensor_model_parallel_world_size()
-    
-    if rank == 0:
-        print(f"{etp_size=} {tp_size=}")
-        param_count = 0
-        causal_lm_params = {}
-        attn_params = {}
-        mlp_params = {}
-        other_params = {}
-        for m in model_parts:
-            m: GPTModel = unwrap_model(m)
-            for name, param in m.named_parameters():
-                param_attr = {
-                    "tp": param.tensor_model_parallel,
-                    "numel": param.numel(),
-                    "shape": param.shape,
-                }
-                if "decoder" not in name:
-                    causal_lm_params[name] = param_attr
-                elif "attention" in name:
-                    attn_params[name] = param_attr
-                elif "mlp." in name:
-                    mlp_params[name] = param_attr
-                else:
-                    other_params[name] = param_attr
-            
-                if param.tensor_model_parallel:
-                    group_size = etp_size if "mlp" in name else tp_size
-                    param_count += param.numel() * group_size
-                else:
-                    param_count += param.numel()
-            
-            hf_params = {
-                "other": {n: {"numel": p.numel(), "shape": p.shape} for n,p in ref_model.named_parameters() if ("attn" not in n and "mlp" not in n)},
-                "attn": {n: {"numel": p.numel(), "shape": p.shape} for n, p in ref_model.named_parameters() if "attn" in n},
-                "mlp": {n: {"numel": p.numel(), "shape": p.shape} for n, p in ref_model.named_parameters() if "mlp" in n},
-            }
-            breakpoint()
-            decoder_layers = ref_model.model.layers
-
-        #         if param.tensor_model_parallel:
-        #             param_count += param.numel() * world_size
-        #         else:
-        #             param_count += param.numel()
-        # print(f"Total param count: {param_count}")
-    return
     # TODO: better checks for various parallelisms
     # Param accounting gets complicated with tied weights, pipeline parallel
     if torch.distributed.get_world_size() == 1:
