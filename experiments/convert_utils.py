@@ -381,7 +381,16 @@ LAYER_NUMBER_REGEX = re.compile(r"decoder\.layers\.(\d+)\.")
 EXPERT_IDX_REGEX = re.compile(r"(?<=\.weight)(\d+)$")
 
 MCORE_ATTN_PAT = "self_attention"
+MCORE_QKV_PAT = "linear_qkv"
+MCORE_ATTN_QKV_PAT = f"{MCORE_ATTN_PAT}.{MCORE_QKV_PAT}"
+
 MCORE_MLP_PAT = "mlp"
+MCORE_MLP_FC_PAT = "linear_fc"
+MCORE_MLP_FC1_PAT = f"{MCORE_MLP_FC_PAT}1"
+MCORE_MLP_FC2_PAT = f"{MCORE_MLP_FC_PAT}2"
+MCORE_EXPERTS_PAT = "experts"
+MCORE_EXPERTS_FC_PAT = f"{MCORE_MLP_PAT}.{MCORE_EXPERTS_PAT}.{MCORE_MLP_FC_PAT}"
+
 TE_STATE_PAT = "_extra_state"
 
 
@@ -984,12 +993,14 @@ def _merge_mlp(src_weights: list[torch.Tensor]) -> torch.Tensor:
     gate, up = src_weights
     return torch.cat([gate, up], dim=0)
 
+
 def _find_partition_dim(src_shape: torch.Size, dst_shape: torch.Size):
     for partition_dim, (s1, s2) in enumerate(zip(src_shape, dst_shape)):
         if s1 != s2:
             break
 
     return partition_dim
+
 
 def load_hf_weights(
     weights_loader: ShardLoader,
@@ -1016,10 +1027,7 @@ def load_hf_weights(
     ) -> torch.Tensor:
         if len(hf_weights) == 1:
             return hf_weights[0]
-        elif (
-            "self_attention.linear_qkv." in mcore_name
-            and "layer_norm" not in mcore_name
-        ):
+        elif MCORE_ATTN_QKV_PAT in mcore_name and "layer_norm" not in mcore_name:
             return _interleave_and_merge_qkv(
                 num_attn_heads=num_attn_heads,
                 num_kv_heads=num_kv_heads,
@@ -1027,7 +1035,7 @@ def load_hf_weights(
                 hidden_size=hidden_size,
                 hf_weights=hf_weights,
             )
-        elif "linear_fc1.weight" in mcore_name or "linear_fc1.bias" in mcore_name:
+        elif MCORE_MLP_FC1_PAT in mcore_name:
             assert len(hf_weights) == 2
             gate, up = hf_weights
             return torch.cat([gate, up], dim=0)
@@ -1043,31 +1051,26 @@ def load_hf_weights(
         if tp_size == 1:
             return [mcore_weights]
 
-        is_qkv = "self_attention.linear_qkv." in mcore_weights_name and "layer_norm" not in mcore_weights_name
-        is_fc1 = "linear_fc1.weight" in mcore_weights_name or "linear_fc1.bias" in mcore_weights_name 
-        is_fc2 = "mlp.experts.linear_fc2.weight" 
+        is_qkv = MCORE_ATTN_QKV_PAT in mcore_weights_name and "layer_norm" not in mcore_weights_name
+        is_fc1 = MCORE_MLP_FC1_PAT in mcore_weights_name
+        is_fc2 = MCORE_MLP_FC2_PAT in mcore_weights_name
 
-        if (
-            "self_attention.linear_qkv." in mcore_weights_name
-            and "layer_norm" not in mcore_weights_name
-        ):
-            return mcore_weights.chunk(tp_size)
-        elif "linear_fc1.weight" in mcore_weights_name or "linear_fc1.bias" in mcore_weights_name:
+        if is_qkv:
+            ret = mcore_weights.chunk(tp_size)
+        elif is_fc1:
             gate, up = mcore_weights.chunk(2)
             gates = gate.chunk(tp_size)
             ups = up.chunk(tp_size)
             ret = [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
-        elif "linear_fc2.weight" in mcore_weights_name:
-            # if dist.get_rank() == 0:
-            #     breakpoint()
+        elif is_fc2:
             ret = mcore_weights.chunk(tp_size, dim=1)
         else:
-            # if dist.get_rank() == 0 and "linear_fc2" in mcore_weights_name:
-            #     breakpoint()
+            # 1D case
             if param.shape == mcore_weights.shape:
                 return [mcore_weights for _ in range(tp_size)]
             assert len(param.shape) == len(mcore_weights.shape)
 
+            # account for any other sharded params
             for partition_dim, (s1, s2) in enumerate(zip(param.shape, mcore_weights.shape)):
                 if s1 != s2:
                     break
@@ -1080,22 +1083,16 @@ def load_hf_weights(
         hf_weights = [weights_loader.get_tensor(n) for n in hf_names]
         mcore_weight = _hf_to_mcore_weights_format(local_name, hf_weights)
 
-        if ".mlp.experts.linear_fc" in local_name:
-            mcore_weights_tp_split = _shard_across_tp(
-                local_name, mcore_weight, param, etp_size
-            )
-            mcore_weights_tp_split = list(mcore_weights_tp_split)
-            mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
-            param_to_load = mcore_weights_tp_split[etp_rank]
+        if MCORE_EXPERTS_FC_PAT in local_name:
+            _tp_size = etp_size
+            _tp_rank = etp_rank
         else:
-            mcore_weights_tp_split = _shard_across_tp(
-                local_name, mcore_weight, param, tp_size
-            )
-            mcore_weights_tp_split = list(mcore_weights_tp_split)
-            mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
-            param_to_load = mcore_weights_tp_split[tp_rank]
+            _tp_size = tp_size
+            _tp_rank = tp_rank
 
-        new_sd[local_name] = param_to_load
+        sharded_weights = _shard_across_tp(local_name, mcore_weight, param, _tp_size)
+        sharded_weights = [w.to(device) for w in sharded_weights]
+        new_sd[local_name] = sharded_weights[_tp_rank]
 
     # strict must be false because of empty TE states, assign must be True when using init on meta
     model.load_state_dict(new_sd, strict=False, assign=True)
