@@ -23,14 +23,14 @@ fi
 
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
-LAUNCHER=${LOCAL_LAUNCH}
+LAUNCHER=${DIST_LAUNCH}
 
-BACKEND="fake"
+BACKEND="nccl"
 RANK=0
 INIT_META="--init-model-with-meta-device"
 INIT_CPU="--use-cpu-initialization"
 
-INIT_METHOD=${INIT_META}
+INIT_METHOD=${INIT_CPU}
 
 LAUNCH_CMD="${LAUNCHER} hf_to_mcore_config.py"
 SAVE_DIR="mcore_chkpts"

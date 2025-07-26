@@ -1,3 +1,4 @@
+import os
 import re
 from argparse import Namespace
 from contextlib import ExitStack, contextmanager
@@ -172,19 +173,26 @@ def meta_device_context():
 
 
 def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
+    world_size = world_size or os.environ.get("WORLD_SIZE", None)
+    rank = rank or os.environ.get("RANK", None)
+
+    assert world_size is not None and rank is not None, (
+        "`world_size` and `rank` must be provided when using `fake` backend"
+    )
+    
+    world_size = int(world_size)
+    rank = int(rank)
+
     if backend == "fake":
-        assert world_size is not None and rank is not None, (
-            "`world_size` and `rank` must be provided when using `fake` backend"
-        )
         from torch.testing._internal.distributed.fake_pg import FakeStore
 
         store = FakeStore()
-        world_size = world_size
-        rank = rank
+        # world_size = world_size
+        # rank = rank
     else:
         store = None
-        world_size = -1
-        rank = -1
+        # world_size = -1
+        # rank = -1
 
     torch.distributed.init_process_group(
         backend=backend, store=store, rank=rank, world_size=world_size
@@ -831,6 +839,7 @@ def _load_hf_weights(
     local_to_hf_map: dict[str, str],
     scatter_weights: bool = False,
     memory_efficient: bool = False,
+    device: str = "cpu"
 ):
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -879,20 +888,26 @@ def _load_hf_weights(
                 # skip lm_head.weight when the model is a value model
                 continue
 
+        if param.device.type == "meta":
+            param = param.new_empty(size=param.size(), device=device)
+        
         param_to_load = torch.empty_like(param)
 
         if ".mlp.experts.linear_fc" in local_name:
             # split mcore weights across etp
             should_load = load_from_disk or (scatter_weights and etp_rank == 0)
+        
             if should_load:
                 mcore_weights_tp_split = _weight_split_across_tp(
                     local_name, mcore_weight, param, etp_size
                 )
                 mcore_weights_tp_split = list(mcore_weights_tp_split)
+                breakpoint()
+                
                 mcore_weights_tp_split = [t.to(param.device) for t in mcore_weights_tp_split]
             else:
                 mcore_weights_tp_split = None
-
+            
             if scatter_weights:
                 torch.distributed.scatter(
                     param_to_load,
@@ -900,6 +915,9 @@ def _load_hf_weights(
                     src=torch.distributed.get_global_rank(etp_group, 0),
                     group=etp_group,
                 )
+            else:
+                param_to_load = mcore_weights_tp_split[etp_rank]
+
         else:
             should_load = load_from_disk or (scatter_weights and tp_rank == 0)
             # split mcore weights across tp
@@ -919,5 +937,8 @@ def _load_hf_weights(
                     src=torch.distributed.get_global_rank(tp_group, 0),
                     group=tp_group,
                 )
+            else:
+                param_to_load = mcore_weights_tp_split[tp_rank]
+        
         # load
         param.copy_(param_to_load)

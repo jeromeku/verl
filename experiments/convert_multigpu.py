@@ -39,7 +39,7 @@ def main():
     parser.add_argument(
         "--model_path", type=str, required=True, help="HuggingFace model path"
     )
-    parser.add_argument("--tp", type=int, default=2, help="Tensor model parallel size")
+    parser.add_argument("--tp", type=int, default=1, help="Tensor model parallel size")
     parser.add_argument(
         "--pp", type=int, default=1, help="Pipeline model parallel size"
     )

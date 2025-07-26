@@ -258,11 +258,39 @@ if __name__ == "__main__":
     from convert_utils import _load_hf_weights
     safetensor_io = SafeTensorIO(model_cache_dir)
     assert len(model_parts) == len(local_to_hf_maps)
-    
+
     for model, map in zip(model_parts, local_to_hf_maps):
         _load_hf_weights(safetensor_io, hf_config, model, map)
 
+    from mbridge import AutoBridge
+    bridge = AutoBridge.from_pretrained(model_path)
+    ref_models = bridge.get_model(use_cpu_initialization=True)
+    bridge.load_weights(ref_models, model_path)
 
+
+    for ref_m, test_m in zip(ref_models, model_parts):
+        ref_devices = get_model_param_devices(ref_m)
+        test_devices = get_model_param_devices(test_m)
+        ref_sd = ref_m.state_dict()
+        test_sd = test_m.state_dict()
+
+        if ref_sd.keys() != test_sd.keys():
+            breakpoint()
+
+        for k in ref_sd.keys():
+            if "_extra_state" in k:
+                continue
+
+            expected = ref_sd[k]
+            actual = test_sd[k]
+            
+            if expected is None:
+                breakpoint()
+
+            if not expected.equal(actual):
+                breakpoint()
+
+    
     if args.use_cpu_initialization:
         from megatron.training.checkpointing import save_checkpoint, load_checkpoint
         save_checkpoint(1, model_parts, None, None, 0)
