@@ -2,9 +2,9 @@
 set -euo pipefail
 
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
-QWEN3_MOE="assets/qwen3_moe_small" #"Qwen/Qwen3-30B-A3B"
+QWEN3_MOE="assets/qwen3_moe_1layer" #"assets/qwen3_moe_4layer" #"Qwen/Qwen3-30B-A3B"
 
-MODEL_ID="${QWEN3_MOE}"
+MODEL_ID="${QWEN3_DENSE}"
 
 TP=1
 PP=1

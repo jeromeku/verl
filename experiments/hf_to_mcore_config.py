@@ -155,8 +155,7 @@ if __name__ == "__main__":
     is_moe = model_path in QWEN3_MOE_MODELS or "moe" in model_path.lower()
     model_cls = Qwen3MoeForCausalLM if is_moe else Qwen3ForCausalLM
     hf_config = AutoConfig.from_pretrained(model_path)
-    breakpoint()
-    
+
     init_distributed(backend=args.backend, world_size=args.world_size, rank=args.rank)
     args = update_args(args, hf_config, use_transformer_engine=True)
     args = validate_args(args)
@@ -255,6 +254,14 @@ if __name__ == "__main__":
         model_cache_dir = snapshot_download(model_path)
     else:
         model_cache_dir = model_path
+
+    from convert_utils import _load_hf_weights
+    safetensor_io = SafeTensorIO(model_cache_dir)
+    assert len(model_parts) == len(local_to_hf_maps)
+    
+    for model, map in zip(model_parts, local_to_hf_maps):
+        _load_hf_weights(safetensor_io, hf_config, model, map)
+
 
     if args.use_cpu_initialization:
         from megatron.training.checkpointing import save_checkpoint, load_checkpoint

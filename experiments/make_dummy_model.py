@@ -1,19 +1,28 @@
+import argparse
+
 import torch
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-NUM_LAYERS = 4
-MODEL_ID = "Qwen/Qwen3-30B-A3B"
-SAVE_PATH = f"assets/qwen3_moe_{NUM_LAYERS}layer"
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_layers", type=int, default=1)
+    args = parser.parse_args()
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-tokenizer.save_pretrained(SAVE_PATH)
+    num_layers = args.num_layers 
+    MODEL_ID = "Qwen/Qwen3-30B-A3B"
+    SAVE_PATH = f"assets/qwen3_moe_{num_layers}layer"
 
-config = Qwen3MoeConfig(num_hidden_layers=NUM_LAYERS, torch_dtype="bfloat16")
-print(config.torch_dtype)
-torch.set_default_dtype(config.torch_dtype)
-model = Qwen3MoeForCausalLM(config)
-assert next(model.parameters()).dtype == config.torch_dtype
-model.save_pretrained(SAVE_PATH)
-print(f"Model and tokenizer saved to {SAVE_PATH}")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer.save_pretrained(SAVE_PATH)
+
+    config: Qwen3MoeConfig = AutoConfig.from_pretrained(MODEL_ID)
+    config.num_hidden_layers = num_layers
+    print(config)
+
+    torch.set_default_dtype(config.torch_dtype)
+    model = Qwen3MoeForCausalLM(config)
+    assert next(model.parameters()).dtype == config.torch_dtype
+    model.save_pretrained(SAVE_PATH)
+    print(f"Model and tokenizer saved to {SAVE_PATH}")
 
