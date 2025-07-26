@@ -7,17 +7,22 @@ from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_layers", type=int, default=1)
+    parser.add_argument("--num_experts", type=int, default=None)
     args = parser.parse_args()
 
     num_layers = args.num_layers 
+    num_experts = args.num_experts
     MODEL_ID = "Qwen/Qwen3-30B-A3B"
-    SAVE_PATH = f"assets/qwen3_moe_{num_layers}layer"
+    config: Qwen3MoeConfig = AutoConfig.from_pretrained(MODEL_ID)
+    num_experts = args.num_experts or config.num_experts
 
+    SAVE_PATH = f"assets/qwen3_moe_{num_layers}layer_{num_experts}experts"
+    
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.save_pretrained(SAVE_PATH)
 
-    config: Qwen3MoeConfig = AutoConfig.from_pretrained(MODEL_ID)
     config.num_hidden_layers = num_layers
+    config.num_experts = num_experts
     print(config)
 
     torch.set_default_dtype(config.torch_dtype)

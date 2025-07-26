@@ -38,7 +38,7 @@ from convert_utils import (
     get_model,
     get_model_provider_func,
     remap_param_names_for_ep_pp,
-    _weight_name_mapping_mcore_local_to_global
+    _weight_name_mapping_mcore_local_to_global,
 )
 from qwen3_configs import (
     get_activation_recompute_config,
@@ -134,23 +134,7 @@ def get_module_param_count(model: torch.nn.Module):
     return {n: get_total_params(m) for n, m in model.named_children()}
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        "HF -> Megatron Config", formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument(
-        "--model-id",
-        help="HF model path, e.g., Qwen/Qwen3-30B-A3B",
-        default=QWEN3_600M,
-      #  choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
-    )
-    parser.add_argument("--backend", default="fake", choices=["fake", "gloo", "nccl"])
-    parser.add_argument("--rank", default=None, type=int)
-    parser.add_argument("--world_size", default=None, type=int)
-
-    add_megatron_arguments(parser)
-    args = parser.parse_args()
-
+def main(args):
     model_path = args.model_id
     is_moe = model_path in QWEN3_MOE_MODELS or "moe" in model_path.lower()
     model_cls = Qwen3MoeForCausalLM if is_moe else Qwen3ForCausalLM
@@ -161,7 +145,6 @@ if __name__ == "__main__":
     args = validate_args(args)
     set_global_variables(args, build_tokenizer=False)
 
-    
     # args = set_vpp_size(hf_config, args)
 
     init_mpu(
@@ -176,11 +159,6 @@ if __name__ == "__main__":
     init_on_cpu = args.use_cpu_initialization
     assert not (init_on_meta and init_on_cpu), f"{init_on_meta=} and {init_on_cpu=} both set"
 
-    # weights can't be initialized on meta
-    if init_on_meta:
-        args.perform_initialization = False
-
-    # Do not initialize so that we can init on meta device
     transformer_config = hf_to_mcore(
         hf_config,
         is_moe=is_moe,
@@ -193,8 +171,8 @@ if __name__ == "__main__":
 
     model_provider_func = get_model_provider_func(transformer_config, args)
     model_parts: list[GPTModel] = get_model(model_provider_func, init_on_meta=init_on_meta)
-   
-   # print(model_parts[0])
+
+    # print(model_parts[0])
 
     param_devices = sum((get_model_param_devices(m) for m in model_parts), Counter())
     mcore_num_params = sum(len(list(m.parameters())) for m in model_parts)
@@ -208,6 +186,71 @@ if __name__ == "__main__":
     hf_param_count = get_total_params(ref_model)
     mcore_param_count = sum(get_total_params(m) for m in model_parts)
 
+    import torch.distributed as dist
+    import torch.distributed.distributed_c10d as c10d
+    import torch.distributed.collective_utils as collectives
+    import torch.distributed._functional_collectives as funcol
+    from convert_utils import dist_print, _extract_layer_number
+    from megatron.core.tensor_parallel.layers import _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS
+
+    dist_print(f"mcore param count: {mcore_param_count}")
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    wg = c10d._get_default_group()
+    mcore_param_counts = [None] * world_size
+
+    dist.all_gather_object(mcore_param_counts, mcore_param_count)
+    total_params = sum(mcore_param_counts)
+
+    dist_print(mcore_param_counts, rank0_only=True)
+    dist_print(f"{hf_param_count=} {total_params=}", rank0_only=True)
+    etp_size = mpu.get_expert_tensor_parallel_world_size() 
+    tp_size =  mpu.get_tensor_model_parallel_world_size()
+    
+    if rank == 0:
+        print(f"{etp_size=} {tp_size=}")
+        param_count = 0
+        causal_lm_params = {}
+        attn_params = {}
+        mlp_params = {}
+        other_params = {}
+        for m in model_parts:
+            m: GPTModel = unwrap_model(m)
+            for name, param in m.named_parameters():
+                param_attr = {
+                    "tp": param.tensor_model_parallel,
+                    "numel": param.numel(),
+                    "shape": param.shape,
+                }
+                if "decoder" not in name:
+                    causal_lm_params[name] = param_attr
+                elif "attention" in name:
+                    attn_params[name] = param_attr
+                elif "mlp." in name:
+                    mlp_params[name] = param_attr
+                else:
+                    other_params[name] = param_attr
+            
+                if param.tensor_model_parallel:
+                    group_size = etp_size if "mlp" in name else tp_size
+                    param_count += param.numel() * group_size
+                else:
+                    param_count += param.numel()
+            
+            hf_params = {
+                "other": {n: {"numel": p.numel(), "shape": p.shape} for n,p in ref_model.named_parameters() if ("attn" not in n and "mlp" not in n)},
+                "attn": {n: {"numel": p.numel(), "shape": p.shape} for n, p in ref_model.named_parameters() if "attn" in n},
+                "mlp": {n: {"numel": p.numel(), "shape": p.shape} for n, p in ref_model.named_parameters() if "mlp" in n},
+            }
+            breakpoint()
+            decoder_layers = ref_model.model.layers
+
+        #         if param.tensor_model_parallel:
+        #             param_count += param.numel() * world_size
+        #         else:
+        #             param_count += param.numel()
+        # print(f"Total param count: {param_count}")
+    return
     # TODO: better checks for various parallelisms
     # Param accounting gets complicated with tied weights, pipeline parallel
     if torch.distributed.get_world_size() == 1:
@@ -233,6 +276,7 @@ if __name__ == "__main__":
 
     from convert_utils import map_mcore_hf_param_names, _local_to_hf
     from megatron.core.transformer import TransformerLayer
+
     gpt_model: GPTModel = unwrap_model(model_parts[0])
     layer: TransformerLayer = gpt_model.decoder.layers[0]
     mlp = layer.mlp
@@ -243,19 +287,22 @@ if __name__ == "__main__":
     for m in name_maps:
         ref = _local_to_hf(m, is_moe=is_moe)
         test = map_mcore_hf_param_names(m, is_moe=is_moe)
-        
+
         assert ref == test
         local_to_hf_maps.append(test)
-    
+
     from mbridge.core.safetensor_io import SafeTensorIO
+
     is_local_dir = not model_path in [*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS]
     if not is_local_dir:
         from huggingface_hub import snapshot_download
+
         model_cache_dir = snapshot_download(model_path)
     else:
         model_cache_dir = model_path
 
     from convert_utils import _load_hf_weights
+
     safetensor_io = SafeTensorIO(model_cache_dir)
     use_TE = args.transformer_impl == "transformer_engine"
 
@@ -265,10 +312,10 @@ if __name__ == "__main__":
         _load_hf_weights(safetensor_io, hf_config, model, map, strict=not use_TE)
 
     from mbridge import AutoBridge
+
     bridge = AutoBridge.from_pretrained(model_path)
     ref_models = bridge.get_model(use_cpu_initialization=True)
     bridge.load_weights(ref_models, model_path)
-
 
     for ref_m, test_m in zip(ref_models, model_parts):
         ref_devices = get_model_param_devices(ref_m)
@@ -285,21 +332,21 @@ if __name__ == "__main__":
 
             expected = ref_sd[k]
             actual = test_sd[k].to(expected.device)
-            
+
             if expected is None:
                 breakpoint()
 
             if not expected.equal(actual):
                 breakpoint()
 
-    
     if args.use_cpu_initialization:
         from megatron.training.checkpointing import save_checkpoint, load_checkpoint
+
         save_checkpoint(1, model_parts, None, None, 0)
-    
+
         if torch.distributed.is_initialized():
             torch.distributed.barrier()
-        
+
         args.load = args.save
 
         load_checkpoint(model_parts, None, None, strict=True)
@@ -308,7 +355,26 @@ if __name__ == "__main__":
     # for idx, m in enumerate(model_parts):
     #     print(f"Model part {idx}")
     #     pp(m.state_dict().keys())
-    
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        "HF -> Megatron Config", formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "--model-id",
+        help="HF model path, e.g., Qwen/Qwen3-30B-A3B",
+        default=QWEN3_600M,
+        #  choices=[*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS],
+    )
+    parser.add_argument("--backend", default="fake", choices=["fake", "gloo", "nccl"])
+    parser.add_argument("--rank", default=None, type=int)
+    parser.add_argument("--world_size", default=None, type=int)
+
+    add_megatron_arguments(parser)
+    args = parser.parse_args()
+    main(args)
+
     if False:
         print(f"HF Model total params: {hf_param_count}")
         print(f"MCore total params: {mcore_param_count}")

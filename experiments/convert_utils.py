@@ -1,11 +1,13 @@
 import os
 import re
+import time
 from argparse import Namespace
 from contextlib import ExitStack, contextmanager
 from dataclasses import fields
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
 from megatron.core import mpu, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import (
@@ -59,7 +61,7 @@ def update_args(
 
     args.no_load_optim = True
     args.no_load_rng = True
-    args.perform_initialization = False
+    args.perform_initialization = not args.init_model_with_meta_device
     args.no_save_optim = True
     args.no_save_rng = True
     args.mock_data = True
@@ -947,5 +949,15 @@ def _load_hf_weights(
         new_sd[local_name] = param_to_load
         #    param.copy_(param_to_load)
     # strict must be false because of empty TE states
-    breakpoint()
     model.load_state_dict(new_sd, strict=False, assign=True)
+
+
+def dist_print(*msg, delay: int = 1, rank0_only: bool = False):    
+    
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        if rank0_only and rank != 0:
+            return
+        time.sleep(rank * delay)
+    
+    print(f"{rank=}:", *msg, flush=True)

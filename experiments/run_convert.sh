@@ -2,11 +2,11 @@
 set -euo pipefail
 
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
-QWEN3_MOE="assets/qwen3_moe_1layer" #"assets/qwen3_moe_4layer" #"Qwen/Qwen3-30B-A3B"
+QWEN3_MOE="assets/qwen3_moe_1layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/Qwen3-30B-A3B"
 
-MODEL_ID="${QWEN3_DENSE}"
+MODEL_ID="${QWEN3_MOE}"
 
-TP=1
+TP=2
 PP=1
 CP=1
 EP=1
@@ -25,12 +25,13 @@ DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
 LAUNCHER=${DIST_LAUNCH}
 
-BACKEND="nccl"
+BACKEND="gloo"
 RANK=0
 INIT_META="--init-model-with-meta-device"
 INIT_CPU="--use-cpu-initialization"
+INIT_CUDA="cuda"
 
-INIT_METHOD=${INIT_META}
+INIT_METHOD=${INIT_CPU}
 
 LAUNCH_CMD="${LAUNCHER} hf_to_mcore_config.py"
 SAVE_DIR="mcore_chkpts"
