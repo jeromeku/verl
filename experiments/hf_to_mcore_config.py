@@ -39,6 +39,7 @@ from convert_utils import (
     get_model_provider_func,
     remap_param_names_for_ep_pp,
     _weight_name_mapping_mcore_local_to_global,
+    dist_print
 )
 from qwen3_configs import (
     get_activation_recompute_config,
@@ -259,6 +260,7 @@ def main(args):
     # pp(hf_config.to_dict())
     # pp(asdict(transformer_config))
 
+    
     model_provider_func = get_model_provider_func(transformer_config, args)
     model_parts: list[GPTModel] = get_model(model_provider_func, init_on_meta=init_on_meta)
 

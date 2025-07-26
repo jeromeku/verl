@@ -181,7 +181,7 @@ def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
     assert world_size is not None and rank is not None, (
         "`world_size` and `rank` must be provided when using `fake` backend"
     )
-    
+
     world_size = int(world_size)
     rank = int(rank)
 
@@ -753,7 +753,8 @@ def map_mcore_hf_param_names(
     # 3 categories of params: embeddings / final norm / output_layer, attn, and mlp
 
 
-def _weight_to_mcore_format(hf_config, mcore_weights_name: str, hf_weights: list[torch.Tensor]
+def _weight_to_mcore_format(
+    hf_config, mcore_weights_name: str, hf_weights: list[torch.Tensor]
 ) -> torch.Tensor:
     if len(hf_weights) == 1:
         return hf_weights[0]
@@ -766,9 +767,7 @@ def _weight_to_mcore_format(hf_config, mcore_weights_name: str, hf_weights: list
         num_key_value_heads = hf_config.num_key_value_heads
         hidden_dim = hf_config.hidden_size
         num_attention_heads = hf_config.num_attention_heads
-        head_dim = getattr(
-            hf_config, "head_dim", hidden_dim // num_attention_heads
-        )
+        head_dim = getattr(hf_config, "head_dim", hidden_dim // num_attention_heads)
         group_dim = head_dim * num_attention_heads // num_key_value_heads
         q, k, v = hf_weights
         # q k v might be tp split
@@ -786,16 +785,14 @@ def _weight_to_mcore_format(hf_config, mcore_weights_name: str, hf_weights: list
 
         qkv = torch.cat([q, k, v], dim=1).view(*out_shape).contiguous()
         return qkv
-    elif (
-        "linear_fc1.weight" in mcore_weights_name
-        or "linear_fc1.bias" in mcore_weights_name
-    ):
+    elif "linear_fc1.weight" in mcore_weights_name or "linear_fc1.bias" in mcore_weights_name:
         # merge gate_proj and up_proj
         assert len(hf_weights) == 2
         gate, up = hf_weights
         return torch.cat([gate, up], dim=0)
-    
+
     raise NotImplementedError(f"Unsupported parameter name: {mcore_weights_name}")
+
 
 def _weight_split_across_tp(
     mcore_weights_name: str,
@@ -811,10 +808,7 @@ def _weight_split_across_tp(
         and "layer_norm" not in mcore_weights_name
     ):
         return mcore_weights.chunk(tp_split_size)
-    elif (
-        "linear_fc1.weight" in mcore_weights_name
-        or "linear_fc1.bias" in mcore_weights_name
-    ):
+    elif "linear_fc1.weight" in mcore_weights_name or "linear_fc1.bias" in mcore_weights_name:
         gate, up = mcore_weights.chunk(2)
         gates = gate.chunk(tp_split_size)
         ups = up.chunk(tp_split_size)
@@ -825,14 +819,13 @@ def _weight_split_across_tp(
         if param.shape == mcore_weights.shape:
             return [mcore_weights for _ in range(tp_split_size)]
         assert len(param.shape) == len(mcore_weights.shape)
-        for partition_dim, (s1, s2) in enumerate(
-            zip(param.shape, mcore_weights.shape)
-        ):
+        for partition_dim, (s1, s2) in enumerate(zip(param.shape, mcore_weights.shape)):
             if s1 != s2:
                 break
 
         ret = mcore_weights.chunk(tp_split_size, dim=partition_dim)
     return ret
+
 
 def _load_hf_weights(
     safetensor_io,
@@ -842,7 +835,7 @@ def _load_hf_weights(
     scatter_weights: bool = False,
     memory_efficient: bool = False,
     strict: bool = True,
-    device: str = "cuda"
+    device: str = "cuda",
 ):
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -898,22 +891,22 @@ def _load_hf_weights(
 
         # if param.device.type == "meta":
         #     param = param.new_empty(size=param.size(), device=device)
-        
+
         param_to_load = torch.empty_like(param)
 
         if ".mlp.experts.linear_fc" in local_name:
             # split mcore weights across etp
             should_load = load_from_disk or (scatter_weights and etp_rank == 0)
-        
+
             if should_load:
                 mcore_weights_tp_split = _weight_split_across_tp(
                     local_name, mcore_weight, param, etp_size
                 )
-                mcore_weights_tp_split = list(mcore_weights_tp_split)                
+                mcore_weights_tp_split = list(mcore_weights_tp_split)
                 mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
             else:
                 mcore_weights_tp_split = None
-            
+
             if scatter_weights:
                 torch.distributed.scatter(
                     param_to_load,
@@ -944,22 +937,66 @@ def _load_hf_weights(
                 )
             else:
                 param_to_load = mcore_weights_tp_split[tp_rank]
-        
 
         new_sd[local_name] = param_to_load
         #    param.copy_(param_to_load)
     # strict must be false because of empty TE states
     model.load_state_dict(new_sd, strict=False, assign=True)
 
+
 from data_utils import ShardLoader
 
+
+def _interleave_and_merge_qkv(
+    num_attn_heads, num_kv_heads, hidden_size, head_dim: int, hf_weights: list[torch.Tensor]
+) -> torch.Tensor:
+    assert len(hf_weights) == 3
+    assert num_attn_heads % num_kv_heads == 0
+
+    query_group_ratio = num_attn_heads // num_kv_heads
+    qdim_per_kv_head = head_dim * query_group_ratio
+
+    q, k, v = hf_weights
+    q_proj_size = head_dim * num_attn_heads
+    k_proj_size = head_dim * num_kv_heads
+
+    assert q.shape[0] == q_proj_size
+    assert k.shape[0] == k_proj_size
+    assert q.shape[0] // qdim_per_kv_head == num_kv_heads
+
+    q = q.view(
+        [
+            num_kv_heads,
+            qdim_per_kv_head,
+            -1,
+        ]
+    )
+    k = k.view([num_kv_heads, head_dim, -1])
+    v = v.view([num_kv_heads, head_dim, -1])
+
+    qkv = torch.cat([q, k, v], dim=1).view(-1, hidden_size).contiguous()
+
+    return qkv
+
+
+def _merge_mlp(src_weights: list[torch.Tensor]) -> torch.Tensor:
+    assert len(src_weights) == 2
+    gate, up = src_weights
+    return torch.cat([gate, up], dim=0)
+
+def _find_partition_dim(src_shape: torch.Size, dst_shape: torch.Size):
+    for partition_dim, (s1, s2) in enumerate(zip(src_shape, dst_shape)):
+        if s1 != s2:
+            break
+
+    return partition_dim
 
 def load_hf_weights(
     weights_loader: ShardLoader,
     hf_config: Qwen3ConfigT,
     model: GPTModel,
     local_to_hf_map: dict[str, str],
-    device: str = "cuda"
+    device: str = "cuda",
 ):
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_size = mpu.get_tensor_model_parallel_world_size()
@@ -967,41 +1004,108 @@ def load_hf_weights(
     etp_rank = mpu.get_expert_tensor_parallel_rank()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
 
+    num_attn_heads = hf_config.num_attention_heads
+    num_kv_heads = hf_config.num_key_value_heads
+    head_dim = hf_config.head_dim
+    hidden_size = hf_config.hidden_size
+
     new_sd = {}
+
+    def _hf_to_mcore_weights_format(
+        mcore_name: str, hf_weights: list[torch.Tensor]
+    ) -> torch.Tensor:
+        if len(hf_weights) == 1:
+            return hf_weights[0]
+        elif (
+            "self_attention.linear_qkv." in mcore_name
+            and "layer_norm" not in mcore_name
+        ):
+            return _interleave_and_merge_qkv(
+                num_attn_heads=num_attn_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                hidden_size=hidden_size,
+                hf_weights=hf_weights,
+            )
+        elif "linear_fc1.weight" in mcore_name or "linear_fc1.bias" in mcore_name:
+            assert len(hf_weights) == 2
+            gate, up = hf_weights
+            return torch.cat([gate, up], dim=0)
+        else:
+            raise ValueError(f"{mcore_name} not recognized")
+
+    def _shard_across_tp(
+        mcore_weights_name: str,
+        mcore_weights: torch.Tensor,
+        param: torch.Tensor,
+        tp_size: int,
+    ) -> list[torch.Tensor]:
+        if tp_size == 1:
+            return [mcore_weights]
+
+        is_qkv = "self_attention.linear_qkv." in mcore_weights_name and "layer_norm" not in mcore_weights_name
+        is_fc1 = "linear_fc1.weight" in mcore_weights_name or "linear_fc1.bias" in mcore_weights_name 
+        is_fc2 = "mlp.experts.linear_fc2.weight" 
+
+        if (
+            "self_attention.linear_qkv." in mcore_weights_name
+            and "layer_norm" not in mcore_weights_name
+        ):
+            return mcore_weights.chunk(tp_size)
+        elif "linear_fc1.weight" in mcore_weights_name or "linear_fc1.bias" in mcore_weights_name:
+            gate, up = mcore_weights.chunk(2)
+            gates = gate.chunk(tp_size)
+            ups = up.chunk(tp_size)
+            ret = [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
+        elif "linear_fc2.weight" in mcore_weights_name:
+            # if dist.get_rank() == 0:
+            #     breakpoint()
+            ret = mcore_weights.chunk(tp_size, dim=1)
+        else:
+            # if dist.get_rank() == 0 and "linear_fc2" in mcore_weights_name:
+            #     breakpoint()
+            if param.shape == mcore_weights.shape:
+                return [mcore_weights for _ in range(tp_size)]
+            assert len(param.shape) == len(mcore_weights.shape)
+
+            for partition_dim, (s1, s2) in enumerate(zip(param.shape, mcore_weights.shape)):
+                if s1 != s2:
+                    break
+            ret = mcore_weights.chunk(tp_size, dim=partition_dim)
+        return ret
 
     for local_name, hf_names in local_to_hf_map.items():
         param = model.state_dict()[local_name]
 
-        # hf format to mcore format
         hf_weights = [weights_loader.get_tensor(n) for n in hf_names]
-        mcore_weight = _weight_to_mcore_format(hf_config, local_name, hf_weights)
-        
+        mcore_weight = _hf_to_mcore_weights_format(local_name, hf_weights)
+
         if ".mlp.experts.linear_fc" in local_name:
-            mcore_weights_tp_split = _weight_split_across_tp(
+            mcore_weights_tp_split = _shard_across_tp(
                 local_name, mcore_weight, param, etp_size
             )
-            mcore_weights_tp_split = list(mcore_weights_tp_split)                
+            mcore_weights_tp_split = list(mcore_weights_tp_split)
             mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
             param_to_load = mcore_weights_tp_split[etp_rank]
         else:
-            mcore_weights_tp_split = _weight_split_across_tp(
+            mcore_weights_tp_split = _shard_across_tp(
                 local_name, mcore_weight, param, tp_size
             )
             mcore_weights_tp_split = list(mcore_weights_tp_split)
             mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
             param_to_load = mcore_weights_tp_split[tp_rank]
-        
+
         new_sd[local_name] = param_to_load
 
     # strict must be false because of empty TE states, assign must be True when using init on meta
     model.load_state_dict(new_sd, strict=False, assign=True)
 
-def dist_print(*msg, delay: int = 1, rank0_only: bool = False):    
-    
+
+def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
     if dist.is_initialized():
         rank = dist.get_rank()
         if rank0_only and rank != 0:
             return
         time.sleep(rank * delay)
-    
+
     print(f"{rank=}:", *msg, flush=True)

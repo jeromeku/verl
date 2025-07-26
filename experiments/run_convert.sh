@@ -31,7 +31,7 @@ INIT_META="--init-model-with-meta-device"
 INIT_CPU="--use-cpu-initialization"
 INIT_CUDA="cuda"
 
-INIT_METHOD=${INIT_CPU}
+INIT_METHOD=${INIT_META}
 
 LAUNCH_CMD="${LAUNCHER} hf_to_mcore_config.py"
 SAVE_DIR="mcore_chkpts"
