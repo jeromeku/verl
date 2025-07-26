@@ -257,10 +257,12 @@ if __name__ == "__main__":
 
     from convert_utils import _load_hf_weights
     safetensor_io = SafeTensorIO(model_cache_dir)
+    use_TE = args.transformer_impl == "transformer_engine"
+
     assert len(model_parts) == len(local_to_hf_maps)
 
     for model, map in zip(model_parts, local_to_hf_maps):
-        _load_hf_weights(safetensor_io, hf_config, model, map)
+        _load_hf_weights(safetensor_io, hf_config, model, map, strict=not use_TE)
 
     from mbridge import AutoBridge
     bridge = AutoBridge.from_pretrained(model_path)
@@ -282,7 +284,7 @@ if __name__ == "__main__":
                 continue
 
             expected = ref_sd[k]
-            actual = test_sd[k]
+            actual = test_sd[k].to(expected.device)
             
             if expected is None:
                 breakpoint()

@@ -839,7 +839,7 @@ def _load_hf_weights(
     local_to_hf_map: dict[str, str],
     scatter_weights: bool = False,
     memory_efficient: bool = False,
-    device: str = "cpu"
+    strict: bool = True,
 ):
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -851,6 +851,9 @@ def _load_hf_weights(
 
     to_load_from_disk = []
     load_from_disk = not scatter_weights
+    meta_device = any(p.device.type == "meta" for p in model.parameters())
+
+    new_sd = {}
 
     for local_name, hf_names in local_to_hf_map.items():
         if ".mlp.experts.linear_fc" in local_name:
@@ -874,6 +877,7 @@ def _load_hf_weights(
     # import mcore weights
     for local_name, hf_names in local_to_hf_map.items():
         param = model.state_dict()[local_name]
+
         # hf format to mcore format
         if set(to_load_from_disk) & set(hf_names):
             if not memory_efficient:
@@ -883,13 +887,14 @@ def _load_hf_weights(
             mcore_weight = _weight_to_mcore_format(hf_config, local_name, hf_weights)
         else:
             mcore_weight = None
+
         if hf_names[0] == "lm_head.weight":
             if param.shape[0] == 1 and mcore_weight.shape[0] != 1:
                 # skip lm_head.weight when the model is a value model
                 continue
 
-        if param.device.type == "meta":
-            param = param.new_empty(size=param.size(), device=device)
+        # if param.device.type == "meta":
+        #     param = param.new_empty(size=param.size(), device=device)
         
         param_to_load = torch.empty_like(param)
 
@@ -901,9 +906,7 @@ def _load_hf_weights(
                 mcore_weights_tp_split = _weight_split_across_tp(
                     local_name, mcore_weight, param, etp_size
                 )
-                mcore_weights_tp_split = list(mcore_weights_tp_split)
-                breakpoint()
-                
+                mcore_weights_tp_split = list(mcore_weights_tp_split)                
                 mcore_weights_tp_split = [t.to(param.device) for t in mcore_weights_tp_split]
             else:
                 mcore_weights_tp_split = None
@@ -917,7 +920,6 @@ def _load_hf_weights(
                 )
             else:
                 param_to_load = mcore_weights_tp_split[etp_rank]
-
         else:
             should_load = load_from_disk or (scatter_weights and tp_rank == 0)
             # split mcore weights across tp
@@ -940,5 +942,8 @@ def _load_hf_weights(
             else:
                 param_to_load = mcore_weights_tp_split[tp_rank]
         
-        # load
-        param.copy_(param_to_load)
+
+        new_sd[local_name] = param_to_load
+        #    param.copy_(param_to_load)
+    # strict must be false because of empty TE states
+    model.load_state_dict(new_sd, strict=False, assign=True)
