@@ -1043,45 +1043,43 @@ def load_hf_weights(
             raise ValueError(f"{mcore_name} not recognized")
 
     def _shard_across_tp(
-        mcore_weights_name: str,
-        mcore_weights: torch.Tensor,
-        param: torch.Tensor,
+        name: str,
+        src_param_mcore: torch.Tensor,
+        param_to_load: torch.Tensor,
         tp_size: int,
     ) -> list[torch.Tensor]:
         if tp_size == 1:
-            return [mcore_weights]
+            return [src_param_mcore]
 
-        is_qkv = MCORE_ATTN_QKV_PAT in mcore_weights_name and "layer_norm" not in mcore_weights_name
-        is_fc1 = MCORE_MLP_FC1_PAT in mcore_weights_name
-        is_fc2 = MCORE_MLP_FC2_PAT in mcore_weights_name
+        is_qkv = MCORE_ATTN_QKV_PAT in name and "layer_norm" not in name
+        is_fc1 = MCORE_MLP_FC1_PAT in name
+        is_fc2 = MCORE_MLP_FC2_PAT in name
 
         if is_qkv:
-            ret = mcore_weights.chunk(tp_size)
+            ret = src_param_mcore.chunk(tp_size)
         elif is_fc1:
-            gate, up = mcore_weights.chunk(2)
+            gate, up = src_param_mcore.chunk(2)
             gates = gate.chunk(tp_size)
             ups = up.chunk(tp_size)
             ret = [torch.cat([g, u], dim=0) for g, u in zip(gates, ups)]
         elif is_fc2:
-            ret = mcore_weights.chunk(tp_size, dim=1)
+            ret = src_param_mcore.chunk(tp_size, dim=1)
         else:
             # 1D case
-            if param.shape == mcore_weights.shape:
-                return [mcore_weights for _ in range(tp_size)]
-            assert len(param.shape) == len(mcore_weights.shape)
+            if param_to_load.shape == src_param_mcore.shape:
+                return [src_param_mcore for _ in range(tp_size)]
+            assert len(param_to_load.shape) == len(src_param_mcore.shape)
 
             # account for any other sharded params
-            for partition_dim, (s1, s2) in enumerate(zip(param.shape, mcore_weights.shape)):
-                if s1 != s2:
-                    break
-            ret = mcore_weights.chunk(tp_size, dim=partition_dim)
+            partition_dim = _find_partition_dim(param_to_load.shape, src_param_mcore.shape)
+            ret = src_param_mcore.chunk(tp_size, dim=partition_dim)
         return ret
 
     for local_name, hf_names in local_to_hf_map.items():
-        param = model.state_dict()[local_name]
+        param_to_load = model.state_dict()[local_name]
 
-        hf_weights = [weights_loader.get_tensor(n) for n in hf_names]
-        mcore_weight = _hf_to_mcore_weights_format(local_name, hf_weights)
+        src_params_hf = [weights_loader.get_tensor(n) for n in hf_names]
+        src_param_mcore = _hf_to_mcore_weights_format(local_name, src_params_hf)
 
         if MCORE_EXPERTS_FC_PAT in local_name:
             _tp_size = etp_size
@@ -1090,7 +1088,7 @@ def load_hf_weights(
             _tp_size = tp_size
             _tp_rank = tp_rank
 
-        sharded_weights = _shard_across_tp(local_name, mcore_weight, param, _tp_size)
+        sharded_weights = _shard_across_tp(local_name, src_param_mcore, param_to_load, _tp_size)
         sharded_weights = [w.to(device) for w in sharded_weights]
         new_sd[local_name] = sharded_weights[_tp_rank]
 
