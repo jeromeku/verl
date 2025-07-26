@@ -840,6 +840,7 @@ def _load_hf_weights(
     scatter_weights: bool = False,
     memory_efficient: bool = False,
     strict: bool = True,
+    device: str = "cuda"
 ):
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -907,7 +908,7 @@ def _load_hf_weights(
                     local_name, mcore_weight, param, etp_size
                 )
                 mcore_weights_tp_split = list(mcore_weights_tp_split)                
-                mcore_weights_tp_split = [t.to(param.device) for t in mcore_weights_tp_split]
+                mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
             else:
                 mcore_weights_tp_split = None
             
@@ -928,7 +929,7 @@ def _load_hf_weights(
                     local_name, mcore_weight, param, tp_size
                 )
                 mcore_weights_tp_split = list(mcore_weights_tp_split)
-                mcore_weights_tp_split = [t.to(param.device) for t in mcore_weights_tp_split]
+                mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
             else:
                 mcore_weights_tp_split = None
 
@@ -946,4 +947,5 @@ def _load_hf_weights(
         new_sd[local_name] = param_to_load
         #    param.copy_(param_to_load)
     # strict must be false because of empty TE states
+    breakpoint()
     model.load_state_dict(new_sd, strict=False, assign=True)
