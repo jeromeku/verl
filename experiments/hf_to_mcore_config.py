@@ -327,21 +327,31 @@ def main(args):
     else:
         model_cache_dir = model_path
 
-    from convert_utils import _load_hf_weights
 
-    safetensor_io = SafeTensorIO(model_cache_dir)
-    use_TE = args.transformer_impl == "transformer_engine"
+    def load_mbridge_ref():
+        from mbridge import AutoBridge
+
+        bridge = AutoBridge.from_pretrained(model_path)
+        ref_models = bridge.get_model(use_cpu_initialization=True)
+        bridge.load_weights(ref_models, model_path)
+    
+        return ref_models
+    
+    from convert_utils import load_hf_weights, dist_print #_load_hf_weights
+    from data_utils import ShardLoader
+
+    loader = ShardLoader(model_cache_dir)
+    #safetensor_io = SafeTensorIO(model_cache_dir)
+#    use_TE = args.transformer_impl == "transformer_engine"
 
     assert len(model_parts) == len(local_to_hf_maps)
 
+    ref_models = load_mbridge_ref()
+    device_type = next(ref_models[0].parameters()).device.type
+
     for model, map in zip(model_parts, local_to_hf_maps):
-        _load_hf_weights(safetensor_io, hf_config, model, map, strict=not use_TE)
+        load_hf_weights(loader, hf_config=hf_config, model=model, local_to_hf_map=map, device=device_type)
 
-    from mbridge import AutoBridge
-
-    bridge = AutoBridge.from_pretrained(model_path)
-    ref_models = bridge.get_model(use_cpu_initialization=True)
-    bridge.load_weights(ref_models, model_path)
 
     for ref_m, test_m in zip(ref_models, model_parts):
         ref_devices = get_model_param_devices(ref_m)
@@ -365,6 +375,7 @@ def main(args):
             if not expected.equal(actual):
                 breakpoint()
 
+    dist_print("State dicts match!")
     return
 
     if args.use_cpu_initialization:

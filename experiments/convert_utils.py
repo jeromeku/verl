@@ -951,123 +951,49 @@ def _load_hf_weights(
     # strict must be false because of empty TE states
     model.load_state_dict(new_sd, strict=False, assign=True)
 
-from mbridge.core import safetensor_io
+from data_utils import ShardLoader
 
 
 def load_hf_weights(
-    safetensor_io: safetensor_io.SafeTensorIO,
+    weights_loader: ShardLoader,
     hf_config: Qwen3ConfigT,
     model: GPTModel,
     local_to_hf_map: dict[str, str],
-    scatter_weights: bool = False,
-    memory_efficient: bool = False,
-    strict: bool = True,
     device: str = "cuda"
 ):
     tp_rank = mpu.get_tensor_model_parallel_rank()
-    tp_group = mpu.get_tensor_model_parallel_group()
     tp_size = mpu.get_tensor_model_parallel_world_size()
 
     etp_rank = mpu.get_expert_tensor_parallel_rank()
-    etp_group = mpu.get_expert_tensor_parallel_group()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
-
-    to_load_from_disk = []
-    load_from_disk = not scatter_weights
 
     new_sd = {}
 
     for local_name, hf_names in local_to_hf_map.items():
-        if ".mlp.experts.linear_fc" in local_name:
-            should_load = load_from_disk or (scatter_weights and etp_rank == 0)
-            if should_load:
-                to_load_from_disk.extend(hf_names)
-        else:
-            should_load = load_from_disk or (scatter_weights and tp_rank == 0)
-            if should_load:
-                to_load_from_disk.extend(hf_names)
-            else:
-                # special case for lm_head.weight
-                # if make value model, every tp rank will load lm_head.weight
-                if "lm_head.weight" in hf_names:
-                    to_load_from_disk.extend(hf_names)
-
-    # load huggingface weights
-    if not memory_efficient:
-        hf_weights_map = safetensor_io.load_some_hf_weight(to_load_from_disk)
-
-    # import mcore weights
-    for local_name, hf_names in local_to_hf_map.items():
         param = model.state_dict()[local_name]
 
         # hf format to mcore format
-        if set(to_load_from_disk) & set(hf_names):
-            if not memory_efficient:
-                hf_weights = [hf_weights_map[x] for x in hf_names]
-            else:
-                hf_weights = [safetensor_io.load_one_hf_weight(x) for x in hf_names]
-            mcore_weight = _weight_to_mcore_format(hf_config, local_name, hf_weights)
-        else:
-            mcore_weight = None
-
-        if hf_names[0] == "lm_head.weight":
-            if param.shape[0] == 1 and mcore_weight.shape[0] != 1:
-                # skip lm_head.weight when the model is a value model
-                continue
-
-        # if param.device.type == "meta":
-        #     param = param.new_empty(size=param.size(), device=device)
+        hf_weights = [weights_loader.get_tensor(n) for n in hf_names]
+        mcore_weight = _weight_to_mcore_format(hf_config, local_name, hf_weights)
         
-        param_to_load = torch.empty_like(param)
-
         if ".mlp.experts.linear_fc" in local_name:
-            # split mcore weights across etp
-            should_load = load_from_disk or (scatter_weights and etp_rank == 0)
-        
-            if should_load:
-                mcore_weights_tp_split = _weight_split_across_tp(
-                    local_name, mcore_weight, param, etp_size
-                )
-                mcore_weights_tp_split = list(mcore_weights_tp_split)                
-                mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
-            else:
-                mcore_weights_tp_split = None
-            
-            if scatter_weights:
-                torch.distributed.scatter(
-                    param_to_load,
-                    mcore_weights_tp_split,
-                    src=torch.distributed.get_global_rank(etp_group, 0),
-                    group=etp_group,
-                )
-            else:
-                param_to_load = mcore_weights_tp_split[etp_rank]
+            mcore_weights_tp_split = _weight_split_across_tp(
+                local_name, mcore_weight, param, etp_size
+            )
+            mcore_weights_tp_split = list(mcore_weights_tp_split)                
+            mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
+            param_to_load = mcore_weights_tp_split[etp_rank]
         else:
-            should_load = load_from_disk or (scatter_weights and tp_rank == 0)
-            # split mcore weights across tp
-            if should_load:
-                mcore_weights_tp_split = _weight_split_across_tp(
-                    local_name, mcore_weight, param, tp_size
-                )
-                mcore_weights_tp_split = list(mcore_weights_tp_split)
-                mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
-            else:
-                mcore_weights_tp_split = None
-
-            if scatter_weights:
-                torch.distributed.scatter(
-                    param_to_load,
-                    mcore_weights_tp_split,
-                    src=torch.distributed.get_global_rank(tp_group, 0),
-                    group=tp_group,
-                )
-            else:
-                param_to_load = mcore_weights_tp_split[tp_rank]
+            mcore_weights_tp_split = _weight_split_across_tp(
+                local_name, mcore_weight, param, tp_size
+            )
+            mcore_weights_tp_split = list(mcore_weights_tp_split)
+            mcore_weights_tp_split = [t.to(device) for t in mcore_weights_tp_split]
+            param_to_load = mcore_weights_tp_split[tp_rank]
         
-
         new_sd[local_name] = param_to_load
-        #    param.copy_(param_to_load)
-    # strict must be false because of empty TE states
+
+    # strict must be false because of empty TE states, assign must be True when using init on meta
     model.load_state_dict(new_sd, strict=False, assign=True)
 
 def dist_print(*msg, delay: int = 1, rank0_only: bool = False):    

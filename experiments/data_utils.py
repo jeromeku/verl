@@ -7,7 +7,7 @@ from typing import Dict, List
 from safetensors import safe_open
 
 
-class LazyShardLoader:
+class ShardLoader:
 
     def __init__(self, checkpoint_dir: str, max_open: int = 32, device="cpu"):
         self.ckpt_dir = Path(checkpoint_dir)
@@ -60,13 +60,11 @@ if __name__ == "__main__":
     from pprint import pprint
 
     from huggingface_hub import snapshot_download
-    from transformers.utils.hub import cached_file
     parser = argparse.ArgumentParser()
     parser.add_argument("model_path", type=str, default="Qwen/Qwen3-0.6B")
     args = parser.parse_args()
 
     chkpt_dir = snapshot_download(args.model_path)
     print(list(Path(chkpt_dir).iterdir()))
-    breakpoint()
-    loader = LazyShardLoader(chkpt_dir)
+    loader = ShardLoader(chkpt_dir)
     pprint(loader.weight_to_file)
