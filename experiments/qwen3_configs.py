@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 import torch
 import torch.nn.functional as F
 from megatron.core import mpu
+from megatron.core.transformer import TransformerConfig
 from transformers.models.qwen3 import Qwen3Config
 from transformers.models.qwen3_moe import Qwen3MoeConfig
 
@@ -20,7 +21,7 @@ QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
 QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
 
 
-def is_qwen3_moe(config: Qwen3ConfigT):
+def is_qwen3_moe_config(config: Qwen3ConfigT):
     return isinstance(config, Qwen3MoeConfig)
 
 
@@ -50,7 +51,7 @@ class MLPConfig(ConfigBase):
 
 
 @dataclass
-class MoeArchConfig(MLPConfig):
+class MoeConfig(MLPConfig):
     # Experts
     moe_ffn_hidden_size: int | None = None
     num_moe_experts: int | None = None
@@ -67,7 +68,7 @@ class MoeArchConfig(MLPConfig):
     moe_router_enable_expert_bias: bool = False
     moe_expert_capacity_factor: float | None = None
     moe_router_bias_update_rate: float = 0.001
-    
+
     @classmethod
     def from_hf(cls, config: Qwen3MoeConfig):
         return cls(
@@ -78,86 +79,12 @@ class MoeArchConfig(MLPConfig):
         )
 
 
-def get_mlp_config(
-    hf_config: Qwen3ConfigT,
-    is_moe: bool = False,
-    # MLP
-    gated_linear_unit: bool = True,
-    activation_func=F.silu,
-    # Experts
-    moe_grouped_gemm: bool = True,
-    moe_use_legacy_grouped_gemm: bool = False,
-    moe_shared_expert_intermediate_size=None,
-    # Router
-    moe_router_dtype=torch.float32,
-    moe_router_score_function: str = "softmax",
-    moe_router_pre_softmax: bool = False,
-    moe_token_dispatcher_type: str = "alltoall",
-    moe_router_enable_expert_bias: bool = False,
-    moe_router_load_balancing_type: str = "aux_loss",
-    moe_expert_capacity_factor=None,
-    moe_router_bias_update_rate: float = 0.001,
-    # Optimizations
-    moe_enable_deepep: bool = False,
-    moe_deepep_num_sms: int = 20,
-    moe_layer_recompute: bool = True,
-    moe_permute_fusion: bool = False,
-    moe_per_layer_logging: bool = True,
-):
-    if isinstance(hf_config, Qwen3ConfigT):
-        assert gated_linear_unit
-        assert activation_func == F.silu
-
-    mlp_config = {
-        # Experts
-        "gated_linear_unit": gated_linear_unit,
-        "activation_func": activation_func,
-    }
-
-    if is_moe:
-        if isinstance(hf_config, Qwen3ConfigT):
-            # Checks specific for Qwen3Moe
-            assert moe_shared_expert_intermediate_size is None
-            assert moe_router_score_function == "softmax"
-            assert not moe_router_pre_softmax
-            assert not moe_router_enable_expert_bias
-            assert moe_router_load_balancing_type == "aux_loss"
-            assert moe_expert_capacity_factor is None
-
-        moe_config = {
-            # Experts
-            "moe_ffn_hidden_size": hf_config.moe_intermediate_size,
-            "num_moe_experts": hf_config.num_experts,
-            "moe_grouped_gemm": moe_grouped_gemm,  # requires TransformerEngine
-            "moe_use_legacy_grouped_gemm": moe_use_legacy_grouped_gemm,  # legacy cutlass grouped gemm
-            "moe_shared_expert_intermediate_size": moe_shared_expert_intermediate_size,  # no shared expert
-            # Router
-            "moe_router_dtype": moe_router_dtype,
-            "moe_router_topk": hf_config.num_experts_per_tok,
-            "moe_router_score_function": moe_router_score_function,
-            "moe_router_pre_softmax": moe_router_pre_softmax,  # softmax is applied **after** topk in Qwen3-Moe
-            "moe_token_dispatcher_type": moe_token_dispatcher_type,  # TODO: tune
-            # auxiliary loss
-            "moe_router_enable_expert_bias": moe_router_enable_expert_bias,  # aux-loss-free routing, only for sigmoid-scored router
-            "moe_router_load_balancing_type": moe_router_load_balancing_type,
-            "moe_expert_capacity_factor": moe_expert_capacity_factor,  # token choice -> no dropped tokens
-            "moe_router_bias_update_rate": moe_router_bias_update_rate,  # TODO: check whether this is needed for aux_loss
-            "moe_aux_loss_coeff": hf_config.router_aux_loss_coef,
-            # optimizations
-            "moe_enable_deepep": moe_enable_deepep,
-            "moe_deepep_num_sms": moe_deepep_num_sms,  # TODO: tune
-            "moe_layer_recompute": moe_layer_recompute,
-            "moe_permute_fusion": moe_permute_fusion,  # TODO: tune
-            "moe_per_layer_logging": moe_per_layer_logging,  # for auxiliary loss
-        }
-    else:
-        moe_config = {}
-
-    return {**mlp_config, **moe_config}
-
-
 @dataclass
-class MoeComputeConfig(ConfigBase):
+class MoeOptConfig(ConfigBase):
+    """
+    Moe optimization config
+    """
+
     # Expert computation
     moe_grouped_gemm: bool = True
     moe_use_legacy_grouped_gemm: bool = False
@@ -226,6 +153,39 @@ class PrecisionConfig(ConfigBase):
     params_dtype: torch.dtype = torch.bfloat16
     bf16: bool = True
 
+    @classmethod
+    def from_hf(
+        cls,
+        config: Qwen3ConfigT,
+        pipeline_dtype: torch.dtype = None,
+        params_dtype: torch.dtype = None,
+        bf16: bool = None,
+        fp16: bool = None,
+    ):
+        default_dtype = config.torch_dtype
+
+        if bf16 is not None and fp16 is not None:
+            assert bf16 ^ fp16
+        if fp16 is not None and fp16:
+            print(f"WARNING: {fp16=} does not match default HF dtype {default_dtype}")
+        if pipeline_dtype is not None and pipeline_dtype != default_dtype:
+            print(
+                f"WARNING: pipeline_dtype != HF default dtype: {pipeline_dtype} != {default_dtype}"
+            )
+        if params_dtype is not None and params_dtype != default_dtype:
+            print(f"WARNING: params_dtype != HF default dtype: {params_dtype} != {default_dtype}")
+
+        # Qwen3 / MoE uses bfloat16 by default
+        if isinstance(config, Qwen3ConfigT):
+            assert config.torch_dtype == torch.bfloat16
+
+        pipeline_dtype = pipeline_dtype or default_dtype
+        params_dtype = params_dtype or default_dtype
+        bf16 = bf16 or default_dtype == torch.bfloat16
+        fp16 = not bf16
+
+        return cls(pipeline_dtype=pipeline_dtype, params_dtype=params_dtype, bf16=bf16, fp16=fp16)
+
 
 @dataclass
 class FusionConfig(ConfigBase):
@@ -242,6 +202,49 @@ class ActivationRecomputeConfig(ConfigBase):
     recompute_num_layers: int = None
     distribute_saved_activations: bool = None
     recompute_modules: list[str] = None
+
+
+@dataclass
+class Qwen3MCoreConfig:
+    arch_config: ArchConfig
+    attn_config: AttnConfig
+    mlp_config: MLPConfig | MoeConfig
+
+    parallelism_config: ParallelismConfig
+    precision_config: PrecisionConfig
+
+    # Optional configs, primarily for optimization
+    moe_opt_config: MoeOptConfig = None
+    fusion_config: FusionConfig = FusionConfig()
+    activation_recompute_config: ActivationRecomputeConfig = ActivationRecomputeConfig()
+
+    @classmethod
+    def from_hf(
+        cls,
+        config: Qwen3ConfigT,
+        moe_opt_config: MoeOptConfig = MoeOptConfig(),
+        parallelism_config: ParallelismConfig = ParallelismConfig(),
+        fusion_config: FusionConfig = FusionConfig(),
+        activation_recompute_config: ActivationRecomputeConfig = ActivationRecomputeConfig(),
+        precision_config: PrecisionConfig = PrecisionConfig(),
+    ):
+        arch_config = ArchConfig.from_hf(config)
+        if is_qwen3_moe_config(config):
+            mlp_config = MoeConfig.from_hf(config)
+        else:
+            mlp_config = MLPConfig()
+
+        attn_config = AttnConfig.from_hf(config)
+        return Qwen3MCoreConfig(
+            arch_config=arch_config,
+            attn_config=attn_config,
+            mlp_config=mlp_config,
+            parallelism_config=parallelism_config,
+            precision_config=precision_config,
+            moe_opt_config=moe_opt_config,
+            fusion_config=fusion_config,
+            activation_recompute_config=activation_recompute_config,
+        )
 
 
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
