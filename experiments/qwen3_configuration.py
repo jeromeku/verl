@@ -21,7 +21,7 @@ QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
 
 QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
 QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
-
+QWEN3_MODELS = [*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS]
 
 def is_qwen3_moe_config(config: Qwen3ConfigT):
     return isinstance(config, Qwen3MoeConfig)
