@@ -22,7 +22,7 @@ from transformers.models.qwen3_moe import Qwen3MoeForCausalLM
 
 import torch.distributed as dist
 import torch
-
+from collections import Counter
 from mcore_utils import (
     init_distributed,
     init_mpu,
@@ -31,7 +31,15 @@ from mcore_utils import (
     get_model_provider_func,
     get_model,
 )
-from qwen3_configuration import QWEN3_MOE_MODELS, Qwen3MCoreConfig, Qwen3ConfigT, ParallelismConfig
+from qwen3_configuration import (
+    QWEN3_MOE_MODELS,
+    Qwen3MCoreConfig,
+    Qwen3ConfigT,
+    ParallelismConfig,
+    Qwen3ModelT,
+    is_qwen3_moe_config,
+)
+from debugging import get_model_param_devices, get_total_params, get_module_param_count
 
 
 def init_megatron(args, seed: int = 1234):
@@ -55,21 +63,79 @@ def init_megatron(args, seed: int = 1234):
         model_parallel_cuda_manual_seed(seed)
 
 
-def create_mcore_model(transformer_config: TransformerConfig, wrap_with_ddp: bool = False):
-    model_provider_func = get_model_provider_func(transformer_config)
-    model_parts: list[GPTModel] = get_model(model_provider_func, wrap_with_ddp=wrap_with_ddp)
-    return model_parts
+def create_mcore_model(config: TransformerConfig, wrap_with_ddp: bool = False):
+    model_provider_func = get_model_provider_func(config)
+    mcore_model: list[GPTModel] = get_model(model_provider_func, wrap_with_ddp=wrap_with_ddp)
+
+    param_devices = sum((get_model_param_devices(m) for m in mcore_model), Counter())
+    mcore_num_params = sum(len(list(m.parameters())) for m in mcore_model)
+
+    if args.init_model_with_meta_device and not param_devices["meta"] == mcore_num_params:
+        print(f"WARNING: not all params on 'meta': {param_devices}")
+
+    return mcore_model
 
 
-def main(args: Namespace):
-    model_path = args.model_id
-    is_moe = model_path in QWEN3_MOE_MODELS or "moe" in model_path.lower()
+def create_reference_model(config: Qwen3ConfigT, args: Namespace):
+    model_cls = Qwen3MoeForCausalLM if is_qwen3_moe_config(config) else Qwen3ForCausalLM
+    if args.init_model_with_meta_device:
+        device = "meta"
+    elif args.use_cpu_initialization:
+        device = "cpu"
+    else:
+        device = "cuda"
 
-    model_cls = Qwen3MoeForCausalLM if is_moe else Qwen3ForCausalLM
+    with torch.device(device):
+        ref_model: Qwen3ModelT = model_cls(config)
+
+    return ref_model
+
+
+def update_args_for_model_loading(args: Namespace):
+
+    init_on_meta = args.init_model_with_meta_device
+    use_cpu_initialization = args.use_cpu_initialization
+
+    assert not (init_on_meta and use_cpu_initialization), (
+        f"{init_on_meta=} and {use_cpu_initialization=} both set"
+    )
+
+    # Should disable to prevent initialization on GPU and need for tensor parallel CUDA RNG
+    args.perform_initialization = not any(
+        [use_cpu_initialization, args.init_model_with_meta_device, args.finetune]
+    )
+
+    # VPP configuration, see megatron-lm/megatron/training/arguments.py
+    # VPP_STAGES = NUM_LAYERS // (PP * VPP)
+    # Each rank gets VPP_STAGES layers in round robin fashion
+    # E.g., Qwen 0.6B has 28 layers
+    # For PP=2, VPP=2, 28 // 2 = 14 stages per rank, interleaved such that Rank 0: [1-7],[15-21] | Rank1: [8-14],[22-28]
+    # Without VPP, Rank 0: [1-14], Rank 1: [15-28]
+    # Note that layer_id's start at 1 in decoder layers
+    
     assert args.num_layers_per_virtual_pipeline_stage is None, (
         "Use --num_virtual_stages_per_pipeline_rank to set VPP size"
     )
     args.virtual_pipeline_model_parallel_size = args.num_virtual_stages_per_pipeline_rank
+    return args
+
+
+def check_param_counts(hf_model: Qwen3ModelT, mcore_model: list[GPTModel]):
+    hf_param_count = get_total_params(hf_model)
+    mcore_param_count = sum(get_total_params(m) for m in mcore_model)
+
+    # TODO: better checks for various parallelisms
+    # Param accounting gets complicated with tied weights, pipeline parallel
+    if torch.distributed.get_world_size() == 1:
+        assert hf_param_count == mcore_param_count, (
+            f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
+        )
+
+
+def main(args: Namespace):
+    args = update_args_for_model_loading(args)
+    model_path = args.model_id
+
     parallel_config = ParallelismConfig(
         tensor_model_parallel_size=args.tensor_model_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
@@ -79,17 +145,12 @@ def main(args: Namespace):
         expert_tensor_parallel_size=args.expert_tensor_parallel_size,
     )
     hf_config = AutoConfig.from_pretrained(model_path)
-    use_cpu_initialization = args.use_cpu_initialization
-    
-    # Should disable to prevent initialization on GPU and need for tensor parallel CUDA RNG
-    perform_initialization = not any([use_cpu_initialization, args.init_model_with_meta_device, args.finetune])
-    assert not perform_initialization
 
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
         parallelism_config=parallel_config,
-        perform_initialization=perform_initialization,
-        use_cpu_initialization=use_cpu_initialization,
+        perform_initialization=args.perform_initialization,
+        use_cpu_initialization=args.use_cpu_initialization,
     )
 
     if dist.is_initialized() and dist.get_rank() == 0 or not dist.is_initialized():
@@ -98,21 +159,14 @@ def main(args: Namespace):
     args = qwen_config.update_mcore_args(args)
     d = qwen_config.to_dict(transformer_config_only=True)
 
-    pprint(d)
-    assert not qwen_config.perform_initialization
     mcore_config: TransformerConfig = qwen_config.to_mcore()
     pprint(mcore_config)
-    assert not mcore_config.perform_initialization
 
     init_megatron(args)
 
-    init_on_meta = args.init_model_with_meta_device
-    init_on_cpu = args.use_cpu_initialization
-    assert not (init_on_meta and init_on_cpu), f"{init_on_meta=} and {init_on_cpu=} both set"
-    assert not mcore_config.perform_initialization 
-
     mcore_model = create_mcore_model(mcore_config)
-    print(mcore_model)
+    hf_model = create_reference_model(hf_config, args)
+    check_param_counts(hf_model, mcore_model)
 
 
 if __name__ == "__main__":

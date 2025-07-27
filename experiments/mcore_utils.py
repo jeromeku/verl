@@ -39,40 +39,17 @@ def patch_mcore_args(
     **kwargs,
 ):
     # Required args for MCore args validation
-    # args.max_position_embeddings = hf_config.max_position_embeddings
-    # args.num_layers = hf_config.num_hidden_layers
-    # args.hidden_size = hf_config.hidden_size
-    # args.num_attention_heads = hf_config.num_attention_heads
-    # args.seq_length = hf_config.max_position_embeddings
     args.micro_batch_size = 1
 
-    # if isinstance(hf_config, Qwen3MoeConfig):
-    #     args.num_experts = hf_config.num_experts
-    #     args.moe_router_topk = hf_config.num_experts_per_tok
-
-    # args.vocab_size = hf_config.vocab_size
-    # args.padded_vocab_size = args.vocab_size
-    # args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
-    # args.position_embedding_type = "rope"
-    # args.rotary_percent = 1.0
-    # args.rotary_base = hf_config.rope_theta
-    # args.rope_scaling = True if hf_config.rope_scaling is not None else False
-
+    # Not needed when loading checkpoints
     args.no_load_optim = True
-    args.no_load_rng = True
-
-    # Disable init when init_on_meta (can't init meta weights); no need when finetuning
-    #args.perform_initialization = not (args.init_model_with_meta_device or args.finetune)
-    
+    args.no_load_rng = True    
     args.no_save_optim = True
     args.no_save_rng = True
     args.mock_data = True
 
     args.rank = args.rank or torch.distributed.get_rank()
     args.world_size = args.world_size or torch.distributed.get_world_size()
-
-    # use TE for optimized parallel linear, attn, and moe grouped linear
-    # args.transformer_impl = "transformer_engine" if use_transformer_engine else "local"
 
     for k, v in kwargs.items():
         setattr(args, k, v)
@@ -189,19 +166,15 @@ def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
 
     if backend == "fake":
         from torch.testing._internal.distributed.fake_pg import FakeStore
-
         store = FakeStore()
-        # world_size = world_size
-        # rank = rank
     else:
         store = None
-        # world_size = -1
-        # rank = -1
 
     torch.distributed.init_process_group(
         backend=backend, store=store, rank=rank, world_size=world_size
     )
-
+    if backend == "nccl":
+        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK")))
 
 def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
     mpu.initialize_model_parallel(

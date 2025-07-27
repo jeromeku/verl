@@ -5,10 +5,11 @@ import torch
 import torch.nn.functional as F
 from megatron.core import mpu
 from megatron.core.transformer import TransformerConfig
-from transformers.models.qwen3 import Qwen3Config
-from transformers.models.qwen3_moe import Qwen3MoeConfig
+from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
+from transformers.models.qwen3_moe import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 Qwen3ConfigT = Qwen3Config | Qwen3MoeConfig
+Qwen3ModelT = Qwen3ForCausalLM | Qwen3MoeForCausalLM
 
 # Dense
 QWEN3_600M = "Qwen/Qwen3-0.6B"
