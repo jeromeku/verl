@@ -31,37 +31,41 @@ try:
     HAVE_FSDP2 = True
 except ImportError:
     HAVE_FSDP2 = False
-from qwen3_configs import Qwen3ConfigT, Qwen3MoeConfig
+from qwen3_configuration import Qwen3ConfigT, Qwen3MCoreConfig, Qwen3MoeConfig
 
 
-def update_args(
+def patch_mcore_args(
     args: Namespace,
-    hf_config: Qwen3ConfigT,
-    use_transformer_engine: bool = True,
     **kwargs,
 ):
     # Required args for MCore args validation
-    args.max_position_embeddings = hf_config.max_position_embeddings
-    args.num_layers = hf_config.num_hidden_layers
-    args.hidden_size = hf_config.hidden_size
-    args.num_attention_heads = hf_config.num_attention_heads
-    args.seq_length = hf_config.max_position_embeddings
+    # args.max_position_embeddings = hf_config.max_position_embeddings
+    # args.num_layers = hf_config.num_hidden_layers
+    # args.hidden_size = hf_config.hidden_size
+    # args.num_attention_heads = hf_config.num_attention_heads
+    # args.seq_length = hf_config.max_position_embeddings
     args.micro_batch_size = 1
 
-    if isinstance(hf_config, Qwen3MoeConfig):
-        args.num_experts = hf_config.num_experts
+    # if isinstance(hf_config, Qwen3MoeConfig):
+    #     args.num_experts = hf_config.num_experts
+    #     args.moe_router_topk = hf_config.num_experts_per_tok
 
-    args.vocab_size = hf_config.vocab_size
-    args.padded_vocab_size = args.vocab_size
-    args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
-    args.position_embedding_type = "rope"
-    args.rotary_percent = 1.0
-    args.rotary_base = hf_config.rope_theta
-    args.rope_scaling = True if hf_config.rope_scaling is not None else False
+    # args.vocab_size = hf_config.vocab_size
+    # args.padded_vocab_size = args.vocab_size
+    # args.untie_embeddings_and_output_weights = not hf_config.tie_word_embeddings
+    # args.position_embedding_type = "rope"
+    # args.rotary_percent = 1.0
+    # args.rotary_base = hf_config.rope_theta
+    # args.rope_scaling = True if hf_config.rope_scaling is not None else False
 
     args.no_load_optim = True
     args.no_load_rng = True
-    args.perform_initialization = not args.init_model_with_meta_device
+    args.finetune = True
+
+    # Disable init when init_on_meta (can't init meta weights); no need when finetuning
+    # if args.perform_initialization:
+    #     args.perform_initialization = not (args.init_model_with_meta_device or args.finetune)
+    
     args.no_save_optim = True
     args.no_save_rng = True
     args.mock_data = True
@@ -70,7 +74,7 @@ def update_args(
     args.world_size = args.world_size or torch.distributed.get_world_size()
 
     # use TE for optimized parallel linear, attn, and moe grouped linear
-    args.transformer_impl = "transformer_engine" if use_transformer_engine else "local"
+    # args.transformer_impl = "transformer_engine" if use_transformer_engine else "local"
 
     for k, v in kwargs.items():
         setattr(args, k, v)
@@ -210,7 +214,6 @@ def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
         expert_tensor_parallel_size=etp,
         create_gloo_process_groups=False,
     )
-    model_parallel_cuda_manual_seed(seed)
 
 
 def get_model(

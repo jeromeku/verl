@@ -44,13 +44,3 @@ def _hf_to_mcore(hf_config: Qwen3ConfigT, is_moe: bool = False, **kwargs) -> Tra
     return final_config
 
 
-class Qwen3MCoreConfig:
-    @staticmethod
-    def from_hf(
-        config: Qwen3ConfigT,
-        moe_compute_config: MoeComputeConfig = MoeComputeConfig(),
-        parallelism_config: ParallelismConfig = ParallelismConfig(),
-        fusion_config: FusionConfig = FusionConfig(),
-        precision_config: PrecisionConfig = PrecisionConfig(),
-    ) -> TransformerConfig:
-        return _hf_to_mcore(config, is_moe=is_qwen3_moe(config))
