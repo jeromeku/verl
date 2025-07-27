@@ -295,7 +295,7 @@ class Qwen3MCoreConfig:
         return merged
     
     def to_mcore(self, **kwargs):
-        return TransformerConfig(self.to_dict(transformer_config_only=True), **kwargs)
+        return TransformerConfig(**self.to_dict(transformer_config_only=True), **kwargs)
     
     def update_mcore_args(self, args: Namespace):
         args.max_position_embeddings = self.max_position_embeddings

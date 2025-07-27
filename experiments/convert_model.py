@@ -68,13 +68,16 @@ def main(args: Namespace):
     
     args = qwen_config.update_mcore_args(args)
     d = qwen_config.to_dict(transformer_config_only=True)
+
+    pprint(d)
+    mcore_transformer_config = qwen_config.to_mcore()
+    pprint(mcore_transformer_config)
+
     init_megatron(args)
 
-    # mcore_transformer_config = qwen_config.to_mcore()
-    # pprint(mcore_transformer_config)
-    # init_on_meta = args.init_model_with_meta_device
-    # init_on_cpu = args.use_cpu_initialization
-    # assert not (init_on_meta and init_on_cpu), f"{init_on_meta=} and {init_on_cpu=} both set"
+    init_on_meta = args.init_model_with_meta_device
+    init_on_cpu = args.use_cpu_initialization
+    assert not (init_on_meta and init_on_cpu), f"{init_on_meta=} and {init_on_cpu=} both set"
 
 
 if __name__ == "__main__":
@@ -92,5 +95,4 @@ if __name__ == "__main__":
 
     add_megatron_arguments(parser)
     args = parser.parse_args()
-    breakpoint()
     main(args)

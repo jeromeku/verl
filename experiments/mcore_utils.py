@@ -366,12 +366,14 @@ def get_model(
                 model_module.broadcast_params()
 
     return model
+from pprint import pprint
+
 
 def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
+    
     if dist.is_initialized():
         rank = dist.get_rank()
         if rank0_only and rank != 0:
             return
         time.sleep(rank * delay)
-
     print(f"{rank=}:", *msg, flush=True)
