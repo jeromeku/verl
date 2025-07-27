@@ -1,3 +1,5 @@
+from dataclasses import asdict, dataclass
+
 import torch
 import torch.nn.functional as F
 from megatron.core import mpu
@@ -16,6 +18,10 @@ QWEN3_235B_A22B = "Qwen/Qwen3-235B-A22B"
 
 QWEN3_DENSE_MODELS = [QWEN3_600M, QWEN3_4B]
 QWEN3_MOE_MODELS = [QWEN3_30B_3B, QWEN3_235B_A22B]
+
+
+def is_qwen3_moe(config: Qwen3ConfigT):
+    return isinstance(config, Qwen3MoeConfig)
 
 
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
@@ -183,24 +189,114 @@ def get_activation_recompute_config(
         "recompute_modules": recompute_modules,
     }
 
+
+@dataclass
+class ConfigBase:
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ParallelismConfig(ConfigBase):
+    tensor_model_parallel_size: int = 1
+    pipeline_model_parallel_size: int = 1
+    virtual_pipeline_model_parallel_size: int = 1
+    expert_model_parallel_size: int = 1
+    expert_tensor_parallel_size: int = 1
+    context_parallel_size: int = 1
+    sequence_parallel: bool = False
+    variable_seq_lengths: bool = False
+
+
+@dataclass
+class MlpConfig(ConfigBase):
+    # Common MLP features
+    gated_linear_unit: bool = True
+    activation_func: object = F.silu
+
+    # Experts
+    moe_ffn_hidden_size: int | None = None
+    num_moe_experts: int | None = None
+    moe_grouped_gemm: bool = True
+    moe_use_legacy_grouped_gemm: bool = False
+    moe_shared_expert_intermediate_size: int | None = None
+
+    # Router
+    moe_router_dtype: torch.dtype = torch.float32
+    moe_router_topk: int | None = None
+    moe_router_score_function: str = "softmax"
+    moe_router_pre_softmax: bool = False
+    moe_token_dispatcher_type: str = "alltoall"
+    moe_router_enable_expert_bias: bool = False
+    moe_router_load_balancing_type: str = "aux_loss"
+    moe_expert_capacity_factor: float | None = None
+    moe_router_bias_update_rate: float = 0.001
+    moe_aux_loss_coeff: float | None = None
+
+    # Optimizations
+    moe_enable_deepep: bool = False
+    moe_deepep_num_sms: int = 20
+    moe_layer_recompute: bool = True
+    moe_permute_fusion: bool = False
+    moe_per_layer_logging: bool = True
+
+
+@dataclass
+class ArchConfig(ConfigBase):
+    num_layers: int
+    hidden_size: int
+    layernorm_epsilon: float
+    normalization: str = "RMSNorm"
+    add_bias_linear: bool = False
+
+
+@dataclass
+class AttnConfig(ConfigBase):
+    num_attention_heads: int
+    num_query_groups: int
+    ffn_hidden_size: int
+    attention_dropout: float
+    hidden_dropout: float = 0.0
+    kv_channels: int | None = None
+    qk_layernorm: bool = True
+
+
+@dataclass
+class PrecisionConfig(ConfigBase):
+    pipeline_dtype: torch.dtype = torch.bfloat16
+    params_dtype: torch.dtype = torch.bfloat16
+    bf16: bool = True
+
+
+@dataclass
+class FusionConfig(ConfigBase):
+    masked_softmax_fusion: bool = False
+    persist_layer_norm: bool = False
+    bias_activation_fusion: bool = False
+    bias_dropout_fusion: bool = False
+
+
+@dataclass
+class ActivationRecomputeConfig(ConfigBase):
+    recompute_granularity: str = None
+    recompute_method: str = None
+    recompute_num_layers: int = None
+    distribute_saved_activations: bool = None
+    recompute_modules: list[str] = None
+
+
 _DIRECT_MAPPING = {
     "embedding.word_embeddings.weight": "model.embed_tokens.weight",
     "decoder.final_layernorm.weight": "model.norm.weight",
     "output_layer.weight": "lm_head.weight",
 }
 _ATTENTION_MAPPING = {
-    "self_attention.linear_proj.weight": [
-        "model.layers.{layer_number}.self_attn.o_proj.weight"
-    ],
+    "self_attention.linear_proj.weight": ["model.layers.{layer_number}.self_attn.o_proj.weight"],
     "self_attention.linear_qkv.layer_norm_weight": [
         "model.layers.{layer_number}.input_layernorm.weight"
     ],
-    "self_attention.q_layernorm.weight": [
-        "model.layers.{layer_number}.self_attn.q_norm.weight"
-    ],
-    "self_attention.k_layernorm.weight": [
-        "model.layers.{layer_number}.self_attn.k_norm.weight"
-    ],
+    "self_attention.q_layernorm.weight": ["model.layers.{layer_number}.self_attn.q_norm.weight"],
+    "self_attention.k_layernorm.weight": ["model.layers.{layer_number}.self_attn.k_norm.weight"],
     "self_attention.linear_qkv.weight": [
         "model.layers.{layer_number}.self_attn.q_proj.weight",
         "model.layers.{layer_number}.self_attn.k_proj.weight",
@@ -227,16 +323,12 @@ _MOE_MLP_MAPPING = {
         "model.layers.{layer_number}.mlp.shared_expert.gate_proj.weight",
         "model.layers.{layer_number}.mlp.shared_expert.up_proj.weight",
     ],
-    "pre_mlp_layernorm": [
-        "model.layers.{layer_number}.post_attention_layernorm.weight"
-    ],
+    "pre_mlp_layernorm": ["model.layers.{layer_number}.post_attention_layernorm.weight"],
     "shared_experts.linear_fc2.weight": [
         "model.layers.{layer_number}.mlp.shared_expert.down_proj.weight"
     ],
     "mlp.router.weight": ["model.layers.{layer_number}.mlp.gate.weight"],
-    "shared_experts.gate_weight": [
-        "model.layers.{layer_number}.mlp.shared_expert_gate.weight"
-    ],
+    "shared_experts.gate_weight": ["model.layers.{layer_number}.mlp.shared_expert_gate.weight"],
     "mlp.experts.linear_fc1": [
         "model.layers.{layer_number}.mlp.experts.{expert_id}.gate_proj.weight",
         "model.layers.{layer_number}.mlp.experts.{expert_id}.up_proj.weight",
