@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 
 import torch
 import torch.nn.functional as F
@@ -245,8 +245,23 @@ class Qwen3MCoreConfig:
             fusion_config=fusion_config,
             activation_recompute_config=activation_recompute_config,
         )
+    
+    def to_dict(self):
+        merged = {}
+    
+        for field_name in self.__dataclass_fields__:
+            value = getattr(self, field_name)
 
+            if is_dataclass(value):
+                merged.update(asdict(value))
+            else:
+                merged[field_name] = value
 
+        return merged
+    
+    def to_mcore(self, **kwargs):
+        return TransformerConfig(self.to_dict(), **kwargs)
+    
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     return {
         "tensor_model_parallel_size": mpu.get_tensor_model_parallel_world_size(),
