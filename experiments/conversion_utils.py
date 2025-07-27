@@ -1,14 +1,15 @@
 import torch
 from megatron.core.transformer import TransformerConfig
 from qwen3_configs import (
+    ActivationRecomputeConfig,
+    AttnConfig,
+    FusionConfig,
+    MLPConfig,
+    MoeArchConfig,
+    MoeComputeConfig,
+    ParallelismConfig,
+    PrecisionConfig,
     Qwen3ConfigT,
-    get_activation_recompute_config,
-    get_arch_config,
-    get_attn_config,
-    get_fusion_config,
-    get_mlp_config,
-    get_parallelism,
-    get_precision_config,
     is_qwen3_moe,
 )
 
@@ -42,7 +43,14 @@ def _hf_to_mcore(hf_config: Qwen3ConfigT, is_moe: bool = False, **kwargs) -> Tra
 
     return final_config
 
-class Qwen3MCoreConfig:    
+
+class Qwen3MCoreConfig:
     @staticmethod
-    def from_hf(config: Qwen3ConfigT, **kwargs) -> TransformerConfig:
-        return _hf_to_mcore(config, is_moe=is_qwen3_moe(config), **kwargs)
+    def from_hf(
+        config: Qwen3ConfigT,
+        moe_compute_config: MoeComputeConfig = MoeComputeConfig(),
+        parallelism_config: ParallelismConfig = ParallelismConfig(),
+        fusion_config: FusionConfig = FusionConfig(),
+        precision_config: PrecisionConfig = PrecisionConfig(),
+    ) -> TransformerConfig:
+        return _hf_to_mcore(config, is_moe=is_qwen3_moe(config))

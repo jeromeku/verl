@@ -24,6 +24,127 @@ def is_qwen3_moe(config: Qwen3ConfigT):
     return isinstance(config, Qwen3MoeConfig)
 
 
+@dataclass
+class ConfigBase:
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ParallelismConfig(ConfigBase):
+    tensor_model_parallel_size: int = 1
+    pipeline_model_parallel_size: int = 1
+    virtual_pipeline_model_parallel_size: int = 1
+    expert_model_parallel_size: int = 1
+    expert_tensor_parallel_size: int = 1
+    context_parallel_size: int = 1
+    sequence_parallel: bool = False
+    variable_seq_lengths: bool = False
+
+
+@dataclass
+class MLPConfig(ConfigBase):
+    # Common MLP features
+    gated_linear_unit: bool = True
+    activation_func: object = F.silu
+
+
+@dataclass
+class MoeArchConfig(MLPConfig):
+    # Experts
+    moe_ffn_hidden_size: int | None = None
+    num_moe_experts: int | None = None
+    moe_shared_expert_intermediate_size: int | None = None
+
+    # Router
+    moe_router_topk: int | None = None
+    moe_router_score_function: str = "softmax"
+    moe_router_pre_softmax: bool = False
+    moe_router_enable_expert_bias: bool = False
+    moe_router_load_balancing_type: str = "aux_loss"
+    moe_expert_capacity_factor: float | None = None
+    moe_router_bias_update_rate: float = 0.001
+    moe_aux_loss_coeff: float | None = None
+
+
+@dataclass
+class MoeComputeConfig(ConfigBase):
+    # Expert computation
+    moe_grouped_gemm: bool = True
+    moe_use_legacy_grouped_gemm: bool = False
+
+    # Router
+    moe_router_dtype: torch.dtype = torch.float32
+    moe_token_dispatcher_type: str = "alltoall"
+
+    # Optimizations
+    moe_enable_deepep: bool = False
+    moe_deepep_num_sms: int = 20
+    moe_layer_recompute: bool = True
+    moe_permute_fusion: bool = False
+    moe_per_layer_logging: bool = False
+
+
+@dataclass
+class ArchConfig(ConfigBase):
+    num_layers: int
+    hidden_size: int
+    layernorm_epsilon: float
+    normalization: str = "RMSNorm"
+    add_bias_linear: bool = False
+
+
+@dataclass
+class AttnConfig(ConfigBase):
+    num_attention_heads: int
+    num_query_groups: int
+    ffn_hidden_size: int
+    attention_dropout: float
+    hidden_dropout: float = 0.0
+    kv_channels: int | None = None
+    qk_layernorm: bool = True
+
+    @classmethod
+    def from_hf(cls, config: Qwen3ConfigT):
+        if isinstance(config, Qwen3ConfigT):
+            # Qwen3 specifies a head_dim, important for calculating correct qkv proj dims
+            assert hasattr(config, "head_dim") and config.head_dim is not None
+
+        return cls(
+            num_attention_heads=config.num_attention_heads,
+            num_query_groups=config.num_key_value_heads,
+            ffn_hidden_size=config.intermediate_size,
+            attention_dropout=config.attention_dropout,
+            hidden_dropout=getattr(config, "hidden_dropout", 0.0),
+            kv_channels=config.head_dim,
+            qk_layernorm=True # Qwen3 always uses qk norm
+        )
+
+
+@dataclass
+class PrecisionConfig(ConfigBase):
+    pipeline_dtype: torch.dtype = torch.bfloat16
+    params_dtype: torch.dtype = torch.bfloat16
+    bf16: bool = True
+
+
+@dataclass
+class FusionConfig(ConfigBase):
+    masked_softmax_fusion: bool = False
+    persist_layer_norm: bool = False
+    bias_activation_fusion: bool = False
+    bias_dropout_fusion: bool = False
+
+
+@dataclass
+class ActivationRecomputeConfig(ConfigBase):
+    recompute_granularity: str = None
+    recompute_method: str = None
+    recompute_num_layers: int = None
+    distribute_saved_activations: bool = None
+    recompute_modules: list[str] = None
+
+
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     return {
         "tensor_model_parallel_size": mpu.get_tensor_model_parallel_world_size(),
@@ -135,7 +256,6 @@ def get_attn_config(hf_config: Qwen3ConfigT, qk_layernorm: bool = True):
     if isinstance(hf_config, Qwen3ConfigT):
         # Qwen3 specifies a head_dim, important for calculating correct qkv proj dims
         assert hasattr(hf_config, "head_dim") and hf_config.head_dim is not None
-        assert qk_layernorm
 
     return {
         "num_attention_heads": hf_config.num_attention_heads,
@@ -190,100 +310,7 @@ def get_activation_recompute_config(
     }
 
 
-@dataclass
-class ConfigBase:
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass
-class ParallelismConfig(ConfigBase):
-    tensor_model_parallel_size: int = 1
-    pipeline_model_parallel_size: int = 1
-    virtual_pipeline_model_parallel_size: int = 1
-    expert_model_parallel_size: int = 1
-    expert_tensor_parallel_size: int = 1
-    context_parallel_size: int = 1
-    sequence_parallel: bool = False
-    variable_seq_lengths: bool = False
-
-
-@dataclass
-class MlpConfig(ConfigBase):
-    # Common MLP features
-    gated_linear_unit: bool = True
-    activation_func: object = F.silu
-
-    # Experts
-    moe_ffn_hidden_size: int | None = None
-    num_moe_experts: int | None = None
-    moe_grouped_gemm: bool = True
-    moe_use_legacy_grouped_gemm: bool = False
-    moe_shared_expert_intermediate_size: int | None = None
-
-    # Router
-    moe_router_dtype: torch.dtype = torch.float32
-    moe_router_topk: int | None = None
-    moe_router_score_function: str = "softmax"
-    moe_router_pre_softmax: bool = False
-    moe_token_dispatcher_type: str = "alltoall"
-    moe_router_enable_expert_bias: bool = False
-    moe_router_load_balancing_type: str = "aux_loss"
-    moe_expert_capacity_factor: float | None = None
-    moe_router_bias_update_rate: float = 0.001
-    moe_aux_loss_coeff: float | None = None
-
-    # Optimizations
-    moe_enable_deepep: bool = False
-    moe_deepep_num_sms: int = 20
-    moe_layer_recompute: bool = True
-    moe_permute_fusion: bool = False
-    moe_per_layer_logging: bool = True
-
-
-@dataclass
-class ArchConfig(ConfigBase):
-    num_layers: int
-    hidden_size: int
-    layernorm_epsilon: float
-    normalization: str = "RMSNorm"
-    add_bias_linear: bool = False
-
-
-@dataclass
-class AttnConfig(ConfigBase):
-    num_attention_heads: int
-    num_query_groups: int
-    ffn_hidden_size: int
-    attention_dropout: float
-    hidden_dropout: float = 0.0
-    kv_channels: int | None = None
-    qk_layernorm: bool = True
-
-
-@dataclass
-class PrecisionConfig(ConfigBase):
-    pipeline_dtype: torch.dtype = torch.bfloat16
-    params_dtype: torch.dtype = torch.bfloat16
-    bf16: bool = True
-
-
-@dataclass
-class FusionConfig(ConfigBase):
-    masked_softmax_fusion: bool = False
-    persist_layer_norm: bool = False
-    bias_activation_fusion: bool = False
-    bias_dropout_fusion: bool = False
-
-
-@dataclass
-class ActivationRecomputeConfig(ConfigBase):
-    recompute_granularity: str = None
-    recompute_method: str = None
-    recompute_num_layers: int = None
-    distribute_saved_activations: bool = None
-    recompute_modules: list[str] = None
-
+# ---- Param Name Mappings ---- #
 
 _DIRECT_MAPPING = {
     "embedding.word_embeddings.weight": "model.embed_tokens.weight",
