@@ -305,8 +305,8 @@ class Qwen3MCoreConfig:
         args.seq_length = self.max_position_embeddings
 
         if isinstance(self.mlp_config, MoeConfig):
-            args.num_experts = self.mlp_config.num_experts
-            args.moe_router_topk = self.mlp_config.num_experts_per_tok
+            args.num_experts = self.mlp_config.num_moe_experts
+            args.moe_router_topk = self.mlp_config.moe_router_topk
 
         args.vocab_size = self.vocab_size
         args.padded_vocab_size = self.vocab_size

@@ -179,8 +179,8 @@ def meta_device_context():
 
 def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
     world_size = world_size or os.environ.get("WORLD_SIZE", None)
-    rank = rank or os.environ.get("RANK", None)
-
+    rank = rank if rank is not None else os.environ.get("RANK", None)
+    
     assert world_size is not None and rank is not None, (
         "`world_size` and `rank` must be provided when using `fake` backend"
     )
@@ -367,3 +367,11 @@ def get_model(
 
     return model
 
+def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
+    if dist.is_initialized():
+        rank = dist.get_rank()
+        if rank0_only and rank != 0:
+            return
+        time.sleep(rank * delay)
+
+    print(f"{rank=}:", *msg, flush=True)
