@@ -230,10 +230,16 @@ class Qwen3MCoreConfig:
     parallelism_config: ParallelismConfig
     precision_config: PrecisionConfig
 
+    # Disable gpu init and tensor parallel CUDA RNG tracker    
+    perform_initialization: bool = False
+    use_cpu_initialization: bool = False
+
     # Optional configs, primarily for optimization
     moe_opt_config: MoeOptConfig = None
     fusion_config: FusionConfig = field(default_factory=FusionConfig)
-    activation_recompute_config: ActivationRecomputeConfig = field(default_factory=ActivationRecomputeConfig)
+    activation_recompute_config: ActivationRecomputeConfig = field(
+        default_factory=ActivationRecomputeConfig
+    )
     use_transformer_engine: bool = True
 
     @classmethod
@@ -249,7 +255,8 @@ class Qwen3MCoreConfig:
         fusion_config: FusionConfig = FusionConfig(),
         activation_recompute_config: ActivationRecomputeConfig = ActivationRecomputeConfig(),
         precision_config: PrecisionConfig = PrecisionConfig(),
-
+        perform_initialization: bool = False,
+        use_cpu_initialization: bool = False,
     ):
         arch_config = ArchConfig.from_hf(config)
         if is_qwen3_moe_config(config):
@@ -268,6 +275,8 @@ class Qwen3MCoreConfig:
             rotary_base=config.rope_theta,
             rope_scaling=config.rope_scaling,
             use_transformer_engine=use_transformer_engine,
+            perform_initialization=perform_initialization,
+            use_cpu_initialization=use_cpu_initialization,
             # Transformer Config
             arch_config=arch_config,
             attn_config=attn_config,
@@ -278,10 +287,10 @@ class Qwen3MCoreConfig:
             fusion_config=fusion_config,
             activation_recompute_config=activation_recompute_config,
         )
-    
+
     def to_dict(self, transformer_config_only: bool = False):
         merged = {}
-    
+
         for field_name in self.__dataclass_fields__:
             value = getattr(self, field_name)
 
@@ -293,10 +302,15 @@ class Qwen3MCoreConfig:
                 merged[field_name] = value
 
         return merged
-    
+
     def to_mcore(self, **kwargs):
-        return TransformerConfig(**self.to_dict(transformer_config_only=True), **kwargs)
-    
+        return TransformerConfig(
+            **self.to_dict(transformer_config_only=True),
+            perform_initialization=self.perform_initialization,
+            use_cpu_initialization=self.use_cpu_initialization,
+            **kwargs,
+        )
+
     def update_mcore_args(self, args: Namespace):
         args.max_position_embeddings = self.max_position_embeddings
         args.num_layers = self.arch_config.num_layers
@@ -316,7 +330,11 @@ class Qwen3MCoreConfig:
         args.rotary_base = self.rotary_base
         args.rope_scaling = True if self.rope_scaling is not None else False
 
+        args.perform_initialization = self.perform_initialization
+        args.use_cpu_initialization = self.use_cpu_initialization
+
         return args
+
 
 def get_parallelism(sequence_parallel: bool = None, variable_seq_lengths=False):
     return {

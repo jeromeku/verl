@@ -60,11 +60,9 @@ def patch_mcore_args(
 
     args.no_load_optim = True
     args.no_load_rng = True
-    args.finetune = True
 
     # Disable init when init_on_meta (can't init meta weights); no need when finetuning
-    # if args.perform_initialization:
-    #     args.perform_initialization = not (args.init_model_with_meta_device or args.finetune)
+    #args.perform_initialization = not (args.init_model_with_meta_device or args.finetune)
     
     args.no_save_optim = True
     args.no_save_rng = True
@@ -103,8 +101,9 @@ def get_transformer_spec(
 
 
 def get_model_provider_func(
-    config: TransformerConfig, args: Namespace, parallel_output: bool = True
+    config: TransformerConfig, parallel_output: bool = True
 ):
+    args = get_args()
     use_transformer_engine = args.transformer_impl == "transformer_engine"
 
     def model_provider_func(pre_process: bool, post_process: bool, vp_stage: int = None):
@@ -220,10 +219,9 @@ def get_model(
     model_provider_func,
     model_type=ModelType.encoder_or_decoder,
     wrap_with_ddp=False,
-    init_on_meta: bool = True,
 ):
     args = get_args()
-
+    init_on_meta = args.init_model_with_meta_device
     # Build model.
     def build_model():
         if (
@@ -366,7 +364,6 @@ def get_model(
                 model_module.broadcast_params()
 
     return model
-from pprint import pprint
 
 
 def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
