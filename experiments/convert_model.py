@@ -15,6 +15,7 @@ from megatron.training.global_vars import set_global_variables
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer import TransformerConfig
+from megatron.training.utils import unwrap_model
 
 from transformers import AutoConfig
 from transformers.models.qwen3 import Qwen3ForCausalLM
@@ -40,7 +41,8 @@ from qwen3_configuration import (
     is_qwen3_moe_config,
 )
 from debugging import get_model_param_devices, get_total_params, get_module_param_count
-
+from ref.convert_utils import _weight_name_mapping_mcore_local_to_global
+from weight_conversion import remap_param_names_for_ep_pp, map_mcore_hf_param_names
 
 def init_megatron(args, seed: int = 1234):
     init_distributed(backend=args.backend, world_size=args.world_size, rank=args.rank)
@@ -112,7 +114,7 @@ def update_args_for_model_loading(args: Namespace):
     # For PP=2, VPP=2, 28 // 2 = 14 stages per rank, interleaved such that Rank 0: [1-7],[15-21] | Rank1: [8-14],[22-28]
     # Without VPP, Rank 0: [1-14], Rank 1: [15-28]
     # Note that layer_id's start at 1 in decoder layers
-    
+
     assert args.num_layers_per_virtual_pipeline_stage is None, (
         "Use --num_virtual_stages_per_pipeline_rank to set VPP size"
     )
@@ -121,6 +123,11 @@ def update_args_for_model_loading(args: Namespace):
 
 
 def check_param_counts(hf_model: Qwen3ModelT, mcore_model: list[GPTModel]):
+    """
+    Quick sanity check only for single device case
+    TODO: add distributed checks
+    """
+
     hf_param_count = get_total_params(hf_model)
     mcore_param_count = sum(get_total_params(m) for m in mcore_model)
 
@@ -131,6 +138,40 @@ def check_param_counts(hf_model: Qwen3ModelT, mcore_model: list[GPTModel]):
             f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
         )
 
+def create_local_to_global_map(mcore_model: list[GPTModel]):
+    name_maps = []
+
+    for m in mcore_model:
+        test = remap_param_names_for_ep_pp(m)
+        ref = _weight_name_mapping_mcore_local_to_global(m)
+        if test != ref:
+            key_diff = set(ref.keys()) - set(ref.keys())
+            val_diff = set(ref.values()) - set(test.values())
+            print(f"{key_diff=}")
+            print(f"{val_diff=}")
+            assert False
+
+        name_maps.append(test)
+
+    return name_maps
+
+def create_mcore_hf_mapping(mcore_model: list[GPTModel], local_to_global_map: dict[str, str], is_moe: bool):
+    from ref.convert_utils import _local_to_hf
+#    gpt_model: GPTModel = unwrap_model(mcore_model)
+    # layer: TransformerLayer = gpt_model.decoder.layers[0]
+    # mlp = layer.mlp
+
+    # is_moe = isinstance(hf_config, Qwen3MoeConfig)
+
+    mcore_to_hf_maps = []
+    for m in local_to_global_map:
+        ref = _local_to_hf(m, is_moe=is_moe)
+        test = map_mcore_hf_param_names(m, is_moe=is_moe)
+
+        assert ref == test
+        mcore_to_hf_maps.append(test)
+
+    return mcore_to_hf_maps
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
@@ -166,8 +207,11 @@ def main(args: Namespace):
 
     mcore_model = create_mcore_model(mcore_config)
     hf_model = create_reference_model(hf_config, args)
-    check_param_counts(hf_model, mcore_model)
 
+    check_param_counts(hf_model, mcore_model)
+    is_moe = is_qwen3_moe_config(hf_config)
+    local_to_global_maps = create_local_to_global_map(mcore_model)
+    mcore_to_hf_maps = create_mcore_hf_mapping(mcore_model, local_to_global_maps, is_moe=is_moe)
 
 if __name__ == "__main__":
     parser = ArgumentParser(
