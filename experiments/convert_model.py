@@ -238,6 +238,8 @@ def main(args: Namespace):
     args = update_args_for_model_loading(args)
     model_path = args.model_id
 
+    sequence_parallel = args.sequence_parallel or args.tensor_model_parallel_size > 1
+
     parallel_config = ParallelismConfig(
         tensor_model_parallel_size=args.tensor_model_parallel_size,
         pipeline_model_parallel_size=args.pipeline_model_parallel_size,
@@ -245,7 +247,9 @@ def main(args: Namespace):
         context_parallel_size=args.context_parallel_size,
         expert_model_parallel_size=args.expert_model_parallel_size,
         expert_tensor_parallel_size=args.expert_tensor_parallel_size,
+        sequence_parallel=sequence_parallel
     )
+    
     hf_config = AutoConfig.from_pretrained(model_path)
 
     qwen_config = Qwen3MCoreConfig.from_hf(
@@ -328,7 +332,7 @@ def main(args: Namespace):
             assert expected.nonzero().sum() > 0
             assert actual is not None
             assert actual.nonzero().sum() > 0
-            
+
             if not expected.equal(actual):
                 breakpoint()
 
