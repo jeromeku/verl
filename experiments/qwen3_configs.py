@@ -60,11 +60,100 @@ class MoeArchConfig(MLPConfig):
     moe_router_topk: int | None = None
     moe_router_score_function: str = "softmax"
     moe_router_pre_softmax: bool = False
-    moe_router_enable_expert_bias: bool = False
     moe_router_load_balancing_type: str = "aux_loss"
+    moe_aux_loss_coeff: float | None = None
+
+    # Not used by Qwen3Moe
+    moe_router_enable_expert_bias: bool = False
     moe_expert_capacity_factor: float | None = None
     moe_router_bias_update_rate: float = 0.001
-    moe_aux_loss_coeff: float | None = None
+    
+    @classmethod
+    def from_hf(cls, config: Qwen3MoeConfig):
+        return cls(
+            moe_ffn_hidden_size=config.moe_intermediate_size,
+            num_moe_experts=config.num_experts,
+            moe_router_topk=config.num_experts_per_tok,
+            moe_aux_loss_coeff=config.router_aux_loss_coef,
+        )
+
+
+def get_mlp_config(
+    hf_config: Qwen3ConfigT,
+    is_moe: bool = False,
+    # MLP
+    gated_linear_unit: bool = True,
+    activation_func=F.silu,
+    # Experts
+    moe_grouped_gemm: bool = True,
+    moe_use_legacy_grouped_gemm: bool = False,
+    moe_shared_expert_intermediate_size=None,
+    # Router
+    moe_router_dtype=torch.float32,
+    moe_router_score_function: str = "softmax",
+    moe_router_pre_softmax: bool = False,
+    moe_token_dispatcher_type: str = "alltoall",
+    moe_router_enable_expert_bias: bool = False,
+    moe_router_load_balancing_type: str = "aux_loss",
+    moe_expert_capacity_factor=None,
+    moe_router_bias_update_rate: float = 0.001,
+    # Optimizations
+    moe_enable_deepep: bool = False,
+    moe_deepep_num_sms: int = 20,
+    moe_layer_recompute: bool = True,
+    moe_permute_fusion: bool = False,
+    moe_per_layer_logging: bool = True,
+):
+    if isinstance(hf_config, Qwen3ConfigT):
+        assert gated_linear_unit
+        assert activation_func == F.silu
+
+    mlp_config = {
+        # Experts
+        "gated_linear_unit": gated_linear_unit,
+        "activation_func": activation_func,
+    }
+
+    if is_moe:
+        if isinstance(hf_config, Qwen3ConfigT):
+            # Checks specific for Qwen3Moe
+            assert moe_shared_expert_intermediate_size is None
+            assert moe_router_score_function == "softmax"
+            assert not moe_router_pre_softmax
+            assert not moe_router_enable_expert_bias
+            assert moe_router_load_balancing_type == "aux_loss"
+            assert moe_expert_capacity_factor is None
+
+        moe_config = {
+            # Experts
+            "moe_ffn_hidden_size": hf_config.moe_intermediate_size,
+            "num_moe_experts": hf_config.num_experts,
+            "moe_grouped_gemm": moe_grouped_gemm,  # requires TransformerEngine
+            "moe_use_legacy_grouped_gemm": moe_use_legacy_grouped_gemm,  # legacy cutlass grouped gemm
+            "moe_shared_expert_intermediate_size": moe_shared_expert_intermediate_size,  # no shared expert
+            # Router
+            "moe_router_dtype": moe_router_dtype,
+            "moe_router_topk": hf_config.num_experts_per_tok,
+            "moe_router_score_function": moe_router_score_function,
+            "moe_router_pre_softmax": moe_router_pre_softmax,  # softmax is applied **after** topk in Qwen3-Moe
+            "moe_token_dispatcher_type": moe_token_dispatcher_type,  # TODO: tune
+            # auxiliary loss
+            "moe_router_enable_expert_bias": moe_router_enable_expert_bias,  # aux-loss-free routing, only for sigmoid-scored router
+            "moe_router_load_balancing_type": moe_router_load_balancing_type,
+            "moe_expert_capacity_factor": moe_expert_capacity_factor,  # token choice -> no dropped tokens
+            "moe_router_bias_update_rate": moe_router_bias_update_rate,  # TODO: check whether this is needed for aux_loss
+            "moe_aux_loss_coeff": hf_config.router_aux_loss_coef,
+            # optimizations
+            "moe_enable_deepep": moe_enable_deepep,
+            "moe_deepep_num_sms": moe_deepep_num_sms,  # TODO: tune
+            "moe_layer_recompute": moe_layer_recompute,
+            "moe_permute_fusion": moe_permute_fusion,  # TODO: tune
+            "moe_per_layer_logging": moe_per_layer_logging,  # for auxiliary loss
+        }
+    else:
+        moe_config = {}
+
+    return {**mlp_config, **moe_config}
 
 
 @dataclass
@@ -93,6 +182,16 @@ class ArchConfig(ConfigBase):
     normalization: str = "RMSNorm"
     add_bias_linear: bool = False
 
+    @classmethod
+    def from_hf(cls, config: Qwen3ConfigT):
+        return cls(
+            num_layers=config.num_hidden_layers,
+            hidden_size=config.hidden_size,
+            layernorm_epsilon=config.rms_norm_eps,
+            normalization="RMSNorm",
+            add_bias_linear=False,
+        )
+
 
 @dataclass
 class AttnConfig(ConfigBase):
@@ -117,7 +216,7 @@ class AttnConfig(ConfigBase):
             attention_dropout=config.attention_dropout,
             hidden_dropout=getattr(config, "hidden_dropout", 0.0),
             kv_channels=config.head_dim,
-            qk_layernorm=True # Qwen3 always uses qk norm
+            qk_layernorm=True,  # Qwen3 always uses qk norm
         )
 
 
