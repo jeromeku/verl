@@ -16,6 +16,7 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer import TransformerConfig
 from megatron.training.utils import unwrap_model
+from megatron.core import mpu
 
 from transformers import AutoConfig
 from transformers.models.qwen3 import Qwen3ForCausalLM
@@ -279,10 +280,13 @@ def generate_sequence(
     prompt: str = "Hello, how are you?  What is your name?",
     max_new_tokens: int = 1,
     topk: int = 3,
+    seed: int = 1234,
 ):
     args = get_args()
     device = next(model[0].parameters()).device.type
-    
+    model_parallel_cuda_manual_seed(seed)
+    from weight_conversion import _find_partition_dim
+
     if args.init_model_with_meta_device:    
         reinitialize_rope(model, rotary_base=args.rotary_base, device=device)
 
@@ -300,7 +304,7 @@ def generate_sequence(
             assert param.device == actual.device
             assert param.equal(actual), f"{name} mismatch: {(param - actual).abs().max().item():.4f}"
     
-    breakpoint()
+    
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(
         hf_model_path, device_map=torch.cuda.current_device()
@@ -314,6 +318,10 @@ def generate_sequence(
     cur_input_ids = input_ids
     cur_position_ids = position_ids
     cur_attention_mask = attention_mask
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    etp_size = mpu.get_expert_tensor_parallel_world_size()
 
     for _ in range(max_new_tokens):
         # Move inputs to GPU
@@ -332,10 +340,16 @@ def generate_sequence(
                 ref_gpt_logits = ref_gpt_output[0].float()
                 _, ref_gpt_topk = ref_gpt_logits.topk(topk, dim=-1)
                 ref_diff = (ref_gpt_logits - output[0].float()).abs().max()
-        breakpoint()
+
         logits: torch.Tensor = output[0].float()
         ref_logits: torch.Tensor = ref_output.logits[0].float()
-
+        
+        if tp_size > 1:
+            partition_dim = _find_partition_dim(logits.shape, ref_logits.shape)
+            dist_print(f"{partition_dim=} {ref_logits.shape=} {logits.shape=}")
+            ref_logits = ref_logits.chunk(tp_size, dim=partition_dim)[tp_rank]
+            assert logits.shape == ref_logits.shape, f"logits shape mismatch: {logits.shape} != {ref_logits.shape}"
+        
         diff = (logits - ref_logits).abs().max()
         dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
         

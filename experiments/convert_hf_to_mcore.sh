@@ -6,7 +6,7 @@ QWEN3_MOE="assets/qwen3_moe_4layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/
 
 MODEL_ID="${QWEN3_DENSE}"
 
-TP=1
+TP=2
 PP=1
 CP=1
 EP=1
