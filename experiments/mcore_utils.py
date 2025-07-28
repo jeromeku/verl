@@ -31,8 +31,9 @@ try:
     HAVE_FSDP2 = True
 except ImportError:
     HAVE_FSDP2 = False
-from qwen3_configuration import Qwen3ConfigT, Qwen3MCoreConfig, Qwen3MoeConfig
+from qwen3_configuration import Qwen3ConfigT
 
+McoreModelT = list[GPTModel]
 
 def patch_mcore_args(
     args: Namespace,

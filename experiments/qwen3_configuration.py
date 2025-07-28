@@ -243,6 +243,8 @@ class Qwen3MCoreConfig:
     )
     use_transformer_engine: bool = True
 
+    hf_config: Qwen3ConfigT = None
+
     @classmethod
     def from_hf(
         cls,
@@ -287,6 +289,7 @@ class Qwen3MCoreConfig:
             moe_opt_config=moe_opt_config,
             fusion_config=fusion_config,
             activation_recompute_config=activation_recompute_config,
+            hf_config=config
         )
 
     def to_dict(self, transformer_config_only: bool = False):
@@ -295,7 +298,7 @@ class Qwen3MCoreConfig:
         for field_name in self.__dataclass_fields__:
             value = getattr(self, field_name)
 
-            if is_dataclass(value):
+            if is_dataclass(value) and not isinstance(value, Qwen3ConfigT):
                 merged.update(asdict(value))
             else:
                 if transformer_config_only:

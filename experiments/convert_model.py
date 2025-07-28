@@ -31,6 +31,7 @@ from mcore_utils import (
     dist_print,
     get_model_provider_func,
     get_model,
+    McoreModelT
 )
 from qwen3_configuration import (
     QWEN3_MOE_MODELS,
@@ -66,9 +67,9 @@ def init_megatron(args, seed: int = 1234):
         model_parallel_cuda_manual_seed(seed)
 
 
-def create_mcore_model(config: TransformerConfig, wrap_with_ddp: bool = False):
+def create_mcore_model(config: TransformerConfig, wrap_with_ddp: bool = False) -> McoreModelT:
     model_provider_func = get_model_provider_func(config)
-    mcore_model_parts: list[GPTModel] = get_model(model_provider_func, wrap_with_ddp=wrap_with_ddp)
+    mcore_model_parts: McoreModelT = get_model(model_provider_func, wrap_with_ddp=wrap_with_ddp)
 
     param_devices = sum((get_model_param_devices(m) for m in mcore_model_parts), Counter())
     mcore_num_params = sum(len(list(m.parameters())) for m in mcore_model_parts)
@@ -79,7 +80,7 @@ def create_mcore_model(config: TransformerConfig, wrap_with_ddp: bool = False):
     return mcore_model_parts
 
 
-def create_reference_model(config: Qwen3ConfigT, args: Namespace):
+def create_reference_model(config: Qwen3ConfigT, args: Namespace) -> Qwen3ModelT:
     model_cls = Qwen3MoeForCausalLM if is_qwen3_moe_config(config) else Qwen3ForCausalLM
     if args.init_model_with_meta_device:
         device = "meta"
@@ -123,7 +124,7 @@ def update_args_for_model_loading(args: Namespace):
     return args
 
 
-def check_param_counts(hf_model: Qwen3ModelT, mcore_model_parts: list[GPTModel]):
+def check_param_counts(hf_model: Qwen3ModelT, mcore_model_parts: McoreModelT):
     """
     Quick sanity check only for single device case
     TODO: add distributed checks
@@ -139,8 +140,8 @@ def check_param_counts(hf_model: Qwen3ModelT, mcore_model_parts: list[GPTModel])
             f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
         )
 
-def create_local_to_global_map(mcore_model_parts: list[GPTModel]):
-    name_maps = []
+def create_local_to_global_map(mcore_model_parts: McoreModelT) -> dict[str, str]:
+    local_to_global_maps = []
 
     for m in mcore_model_parts:
         test = remap_param_names_for_ep_pp(m)
@@ -152,18 +153,13 @@ def create_local_to_global_map(mcore_model_parts: list[GPTModel]):
             print(f"{val_diff=}")
             assert False
 
-        name_maps.append(test)
+        local_to_global_maps.append(test)
 
-    return name_maps
+    return local_to_global_maps
 
-def create_mcore_hf_mapping(mcore_model_parts: list[GPTModel], local_to_global_map: dict[str, str], is_moe: bool):
+def create_mcore_hf_mapping(local_to_global_map: dict[str, str], is_moe: bool) -> dict[str, str]:
     from ref.convert_utils import _local_to_hf
-#    gpt_model: GPTModel = unwrap_model(mcore_model_parts)
-    # layer: TransformerLayer = gpt_model.decoder.layers[0]
-    # mlp = layer.mlp
-
-    # is_moe = isinstance(hf_config, Qwen3MoeConfig)
-
+#
     mcore_to_hf_maps = []
     for m in local_to_global_map:
         ref = _local_to_hf(m, is_moe=is_moe)
@@ -174,7 +170,7 @@ def create_mcore_hf_mapping(mcore_model_parts: list[GPTModel], local_to_global_m
 
     return mcore_to_hf_maps
 
-def get_model_cache(model_path: str):
+def get_model_cache(model_path: str) -> str:
     is_local_dir = not model_path in QWEN3_MODELS
     if not is_local_dir:
         from huggingface_hub import snapshot_download
@@ -184,18 +180,34 @@ def get_model_cache(model_path: str):
 
     return model_cache_dir
 
-def load_mcore_model_weights(model_path: str, mcore_model_parts: list[GPTModel], mcore_to_hf_maps: list[dict[str, str]], device: str = "cuda"):
+def load_mcore_model_weights(model_path: str, mcore_model_parts: McoreModelT, mcore_to_hf_maps: list[dict[str, str]], device: str = "cuda"):
     model_cache_dir = get_model_cache(model_path)
 
     loader = ShardLoader(model_cache_dir)
     assert len(mcore_model_parts) == len(mcore_to_hf_maps)
 
     loader.load_hf_weights(mcore_model_parts, mcore_to_hf_maps, device=device)
+    
     from ref.convert_utils import check_weights
-
     check_weights(model_path, mcore_model_parts=mcore_model_parts)
 
     return mcore_model_parts
+
+def convert_hf_to_mcore(qwen_config: Qwen3MCoreConfig, model_path: str) -> tuple[TransformerConfig, McoreModelT]:
+    mcore_config: TransformerConfig = qwen_config.to_mcore()
+    hf_config: Qwen3ConfigT = qwen_config.hf_config
+
+    mcore_model_parts = create_mcore_model(mcore_config)
+    hf_model = create_reference_model(hf_config, args)
+
+    check_param_counts(hf_model, mcore_model_parts)
+    is_moe = is_qwen3_moe_config(hf_config)
+    local_to_global_maps = create_local_to_global_map(mcore_model_parts)
+    mcore_to_hf_maps = create_mcore_hf_mapping(local_to_global_maps, is_moe=is_moe)
+
+    load_mcore_model_weights(model_path=model_path, mcore_model_parts=mcore_model_parts, mcore_to_hf_maps=mcore_to_hf_maps)
+
+    return mcore_config, mcore_model_parts
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
@@ -226,22 +238,24 @@ def main(args: Namespace):
         pprint(qwen_config)
 
     args = qwen_config.update_mcore_args(args)
-    d = qwen_config.to_dict(transformer_config_only=True)
 
-    mcore_config: TransformerConfig = qwen_config.to_mcore()
-    pprint(mcore_config)
 
     init_megatron(args)
 
-    mcore_model_parts = create_mcore_model(mcore_config)
-    hf_model = create_reference_model(hf_config, args)
+    mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
-    check_param_counts(hf_model, mcore_model_parts)
-    is_moe = is_qwen3_moe_config(hf_config)
-    local_to_global_maps = create_local_to_global_map(mcore_model_parts)
-    mcore_to_hf_maps = create_mcore_hf_mapping(mcore_model_parts, local_to_global_maps, is_moe=is_moe)
+    # mcore_config: TransformerConfig = qwen_config.to_mcore()
+    # pprint(mcore_config)
 
-    load_mcore_model_weights(model_path=model_path, mcore_model_parts=mcore_model_parts, mcore_to_hf_maps=mcore_to_hf_maps)
+    # mcore_model_parts = create_mcore_model(mcore_config)
+    # hf_model = create_reference_model(hf_config, args)
+
+    # check_param_counts(hf_model, mcore_model_parts)
+    # is_moe = is_qwen3_moe_config(hf_config)
+    # local_to_global_maps = create_local_to_global_map(mcore_model_parts)
+    # mcore_to_hf_maps = create_mcore_hf_mapping(mcore_model_parts, local_to_global_maps, is_moe=is_moe)
+
+    # load_mcore_model_weights(model_path=model_path, mcore_model_parts=mcore_model_parts, mcore_to_hf_maps=mcore_to_hf_maps)
     # from mbridge.core.safetensor_io import SafeTensorIO
 
     # is_local_dir = not model_path in QWEN3_MODELS
