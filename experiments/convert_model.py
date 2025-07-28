@@ -43,7 +43,7 @@ from qwen3_configuration import (
 )
 from debugging import get_model_param_devices, get_total_params, get_module_param_count
 from ref.convert_utils import _weight_name_mapping_mcore_local_to_global
-from weight_conversion import remap_param_names_for_ep_pp, map_mcore_hf_param_names
+from weight_conversion import remap_param_names_for_ep_pp, map_mcore_hf_param_names, ShardLoader
 
 def init_megatron(args, seed: int = 1234):
     init_distributed(backend=args.backend, world_size=args.world_size, rank=args.rank)
@@ -174,65 +174,68 @@ def create_mcore_hf_mapping(mcore_model: list[GPTModel], local_to_global_map: di
 
     return mcore_to_hf_maps
 
-def load_mcore_model_weights():
-    from mbridge.core.safetensor_io import SafeTensorIO
-
-    is_local_dir = not model_path in [*QWEN3_DENSE_MODELS, *QWEN3_MOE_MODELS]
+def get_model_cache(model_path: str):
+    is_local_dir = not model_path in QWEN3_MODELS
     if not is_local_dir:
         from huggingface_hub import snapshot_download
         model_cache_dir = snapshot_download(model_path)
     else:
         model_cache_dir = model_path
 
+    return model_cache_dir
 
-    def load_mbridge_ref():
-        from mbridge import AutoBridge
-
-        bridge = AutoBridge.from_pretrained(model_path)
-        ref_models = bridge.get_model(use_cpu_initialization=True)
-        bridge.load_weights(ref_models, model_path)
-    
-        return ref_models
-    
-    from convert_utils import load_hf_weights, dist_print #_load_hf_weights
-    from data_utils import ShardLoader
+def load_mcore_model_weights(model_path: str, mcore_model: list[GPTModel], local_to_hf_maps: list[dict[str, str]]):
+    model_cache_dir = get_model_cache(model_path)
 
     loader = ShardLoader(model_cache_dir)
-    #safetensor_io = SafeTensorIO(model_cache_dir)
-#    use_TE = args.transformer_impl == "transformer_engine"
+    assert len(mcore_model) == len(local_to_hf_maps)
 
-    assert len(model_parts) == len(local_to_hf_maps)
+    for model, map in zip(mcore_model, local_to_hf_maps):
+        loader.load_hf_weights(model=model, local_to_hf_map=map, device="cpu")
 
-    ref_models = load_mbridge_ref()
-    device_type = next(ref_models[0].parameters()).device.type
+    def check_weights():
+        from mbridge.core.safetensor_io import SafeTensorIO
+    
+        def load_mbridge_ref():
+            from mbridge import AutoBridge
 
-    for model, map in zip(model_parts, local_to_hf_maps):
-        load_hf_weights(loader, hf_config=hf_config, model=model, local_to_hf_map=map, device=device_type)
+            bridge = AutoBridge.from_pretrained(model_path)
+            bridge.config.perform_initialization = False
+            bridge.config.use_cpu_initialization = True
+            ref_models = bridge.get_model(use_cpu_initialization=True)
+            bridge.load_weights(ref_models, model_path)
+        
+            return ref_models
+        
+        ref_models = load_mbridge_ref()
+        device_type = next(ref_models[0].parameters()).device.type
 
+        for ref_m, test_m in zip(ref_models, mcore_model):
+            ref_devices = get_model_param_devices(ref_m)
+            test_devices = get_model_param_devices(test_m)
+            ref_sd = ref_m.state_dict()
+            test_sd = test_m.state_dict()
 
-    for ref_m, test_m in zip(ref_models, model_parts):
-        ref_devices = get_model_param_devices(ref_m)
-        test_devices = get_model_param_devices(test_m)
-        ref_sd = ref_m.state_dict()
-        test_sd = test_m.state_dict()
-
-        if ref_sd.keys() != test_sd.keys():
-            breakpoint()
-
-        for k in ref_sd.keys():
-            if "_extra_state" in k:
-                continue
-
-            expected = ref_sd[k]
-            actual = test_sd[k].to(expected.device)
-
-            if expected is None:
+            if ref_sd.keys() != test_sd.keys():
                 breakpoint()
 
-            if not expected.equal(actual):
-                breakpoint()
+            for k in ref_sd.keys():
+                if "_extra_state" in k:
+                    continue
 
-    dist_print("State dicts match!")
+                expected = ref_sd[k]
+                actual = test_sd[k].to(expected.device)
+
+                if expected is None:
+                    breakpoint()
+
+                if not expected.equal(actual):
+                    breakpoint()
+
+        dist_print("State dicts match!")
+    check_weights()
+
+    return mcore_model
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
@@ -249,7 +252,7 @@ def main(args: Namespace):
         expert_tensor_parallel_size=args.expert_tensor_parallel_size,
         sequence_parallel=sequence_parallel
     )
-    
+
     hf_config = AutoConfig.from_pretrained(model_path)
 
     qwen_config = Qwen3MCoreConfig.from_hf(
@@ -278,65 +281,66 @@ def main(args: Namespace):
     local_to_global_maps = create_local_to_global_map(mcore_model)
     mcore_to_hf_maps = create_mcore_hf_mapping(mcore_model, local_to_global_maps, is_moe=is_moe)
 
-    from mbridge.core.safetensor_io import SafeTensorIO
+    load_mcore_model_weights(model_path=model_path, mcore_model=mcore_model, local_to_hf_maps=mcore_to_hf_maps)
+    # from mbridge.core.safetensor_io import SafeTensorIO
 
-    is_local_dir = not model_path in QWEN3_MODELS
-    if not is_local_dir:
-        from huggingface_hub import snapshot_download
-        model_cache_dir = snapshot_download(model_path)
-    else:
-        model_cache_dir = model_path
+    # is_local_dir = not model_path in QWEN3_MODELS
+    # if not is_local_dir:
+    #     from huggingface_hub import snapshot_download
+    #     model_cache_dir = snapshot_download(model_path)
+    # else:
+    #     model_cache_dir = model_path
 
-    def load_mbridge_ref():
-        from mbridge import AutoBridge
+    # def load_mbridge_ref():
+    #     from mbridge import AutoBridge
 
-        bridge = AutoBridge.from_pretrained(model_path)
-        bridge.config.perform_initialization = False
-        bridge.config.use_cpu_initialization = args.use_cpu_initialization
-        ref_models = bridge.get_model(use_cpu_initialization=args.use_cpu_initialization)
-        bridge.load_weights(ref_models, model_path)
+    #     bridge = AutoBridge.from_pretrained(model_path)
+    #     bridge.config.perform_initialization = False
+    #     bridge.config.use_cpu_initialization = args.use_cpu_initialization
+    #     ref_models = bridge.get_model(use_cpu_initialization=args.use_cpu_initialization)
+    #     bridge.load_weights(ref_models, model_path)
     
-        return ref_models
+    #     return ref_models
     
-    from ref.convert_utils import load_hf_weights
-    from ref.data_utils import ShardLoader
+    # from ref.convert_utils import load_hf_weights
+    # from ref.data_utils import ShardLoader
     
-    loader = ShardLoader(model_cache_dir)
+    # loader = ShardLoader(model_cache_dir)
 
-    assert len(mcore_model) == len(mcore_to_hf_maps)
+    # assert len(mcore_model) == len(mcore_to_hf_maps)
 
-    ref_models = load_mbridge_ref()
-    device_type = next(ref_models[0].parameters()).device.type
+    # ref_models = load_mbridge_ref()
+    # device_type = next(ref_models[0].parameters()).device.type
 
-    for model, map in zip(mcore_model, mcore_to_hf_maps):
-        load_hf_weights(loader, hf_config=hf_config, model=model, local_to_hf_map=map, device=device_type)
+    # for model, map in zip(mcore_model, mcore_to_hf_maps):
+    #     load_hf_weights(loader, hf_config=hf_config, model=model, local_to_hf_map=map, device=device_type)
 
 
-    for ref_m, test_m in zip(ref_models, mcore_model):
-        ref_devices = get_model_param_devices(ref_m)
-        test_devices = get_model_param_devices(test_m)
-        ref_sd = ref_m.state_dict()
-        test_sd = test_m.state_dict()
+    # for ref_m, test_m in zip(ref_models, mcore_model):
+    #     ref_devices = get_model_param_devices(ref_m)
+    #     test_devices = get_model_param_devices(test_m)
+    #     ref_sd = ref_m.state_dict()
+    #     test_sd = test_m.state_dict()
 
-        if ref_sd.keys() != test_sd.keys():
-            breakpoint()
+    #     if ref_sd.keys() != test_sd.keys():
+    #         breakpoint()
 
-        for k in ref_sd.keys():
-            if "_extra_state" in k:
-                continue
+    #     for k in ref_sd.keys():
+    #         if "_extra_state" in k:
+    #             continue
 
-            expected = ref_sd[k]
-            actual = test_sd[k].to(expected.device)
+    #         expected = ref_sd[k]
+    #         actual = test_sd[k].to(expected.device)
 
-            assert expected is not None
-            assert expected.nonzero().sum() > 0
-            assert actual is not None
-            assert actual.nonzero().sum() > 0
+    #         assert expected is not None
+    #         assert expected.nonzero().sum() > 0
+    #         assert actual is not None
+    #         assert actual.nonzero().sum() > 0
 
-            if not expected.equal(actual):
-                breakpoint()
+    #         if not expected.equal(actual):
+    #             breakpoint()
 
-    dist_print("State dicts match!")
+    # dist_print("State dicts match!")
 
 if __name__ == "__main__":
     parser = ArgumentParser(
