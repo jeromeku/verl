@@ -68,15 +68,15 @@ def init_megatron(args, seed: int = 1234):
 
 def create_mcore_model(config: TransformerConfig, wrap_with_ddp: bool = False):
     model_provider_func = get_model_provider_func(config)
-    mcore_model: list[GPTModel] = get_model(model_provider_func, wrap_with_ddp=wrap_with_ddp)
+    mcore_model_parts: list[GPTModel] = get_model(model_provider_func, wrap_with_ddp=wrap_with_ddp)
 
-    param_devices = sum((get_model_param_devices(m) for m in mcore_model), Counter())
-    mcore_num_params = sum(len(list(m.parameters())) for m in mcore_model)
+    param_devices = sum((get_model_param_devices(m) for m in mcore_model_parts), Counter())
+    mcore_num_params = sum(len(list(m.parameters())) for m in mcore_model_parts)
 
     if args.init_model_with_meta_device and not param_devices["meta"] == mcore_num_params:
         print(f"WARNING: not all params on 'meta': {param_devices}")
 
-    return mcore_model
+    return mcore_model_parts
 
 
 def create_reference_model(config: Qwen3ConfigT, args: Namespace):
@@ -123,14 +123,14 @@ def update_args_for_model_loading(args: Namespace):
     return args
 
 
-def check_param_counts(hf_model: Qwen3ModelT, mcore_model: list[GPTModel]):
+def check_param_counts(hf_model: Qwen3ModelT, mcore_model_parts: list[GPTModel]):
     """
     Quick sanity check only for single device case
     TODO: add distributed checks
     """
 
     hf_param_count = get_total_params(hf_model)
-    mcore_param_count = sum(get_total_params(m) for m in mcore_model)
+    mcore_param_count = sum(get_total_params(m) for m in mcore_model_parts)
 
     # TODO: better checks for various parallelisms
     # Param accounting gets complicated with tied weights, pipeline parallel
@@ -139,10 +139,10 @@ def check_param_counts(hf_model: Qwen3ModelT, mcore_model: list[GPTModel]):
             f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
         )
 
-def create_local_to_global_map(mcore_model: list[GPTModel]):
+def create_local_to_global_map(mcore_model_parts: list[GPTModel]):
     name_maps = []
 
-    for m in mcore_model:
+    for m in mcore_model_parts:
         test = remap_param_names_for_ep_pp(m)
         ref = _weight_name_mapping_mcore_local_to_global(m)
         if test != ref:
@@ -156,9 +156,9 @@ def create_local_to_global_map(mcore_model: list[GPTModel]):
 
     return name_maps
 
-def create_mcore_hf_mapping(mcore_model: list[GPTModel], local_to_global_map: dict[str, str], is_moe: bool):
+def create_mcore_hf_mapping(mcore_model_parts: list[GPTModel], local_to_global_map: dict[str, str], is_moe: bool):
     from ref.convert_utils import _local_to_hf
-#    gpt_model: GPTModel = unwrap_model(mcore_model)
+#    gpt_model: GPTModel = unwrap_model(mcore_model_parts)
     # layer: TransformerLayer = gpt_model.decoder.layers[0]
     # mlp = layer.mlp
 
@@ -184,17 +184,15 @@ def get_model_cache(model_path: str):
 
     return model_cache_dir
 
-def load_mcore_model_weights(model_path: str, mcore_model: list[GPTModel], local_to_hf_maps: list[dict[str, str]]):
+def load_mcore_model_weights(model_path: str, mcore_model_parts: list[GPTModel], mcore_to_hf_maps: list[dict[str, str]], device: str = "cuda"):
     model_cache_dir = get_model_cache(model_path)
 
     loader = ShardLoader(model_cache_dir)
-    assert len(mcore_model) == len(local_to_hf_maps)
+    assert len(mcore_model_parts) == len(mcore_to_hf_maps)
 
-    for model, map in zip(mcore_model, local_to_hf_maps):
-        loader.load_hf_weights(model=model, local_to_hf_map=map, device="cpu")
+    loader.load_hf_weights(mcore_model_parts, mcore_to_hf_maps, device=device)
 
     def check_weights():
-        from mbridge.core.safetensor_io import SafeTensorIO
     
         def load_mbridge_ref():
             from mbridge import AutoBridge
@@ -208,9 +206,8 @@ def load_mcore_model_weights(model_path: str, mcore_model: list[GPTModel], local
             return ref_models
         
         ref_models = load_mbridge_ref()
-        device_type = next(ref_models[0].parameters()).device.type
 
-        for ref_m, test_m in zip(ref_models, mcore_model):
+        for ref_m, test_m in zip(ref_models, mcore_model_parts):
             ref_devices = get_model_param_devices(ref_m)
             test_devices = get_model_param_devices(test_m)
             ref_sd = ref_m.state_dict()
@@ -235,7 +232,7 @@ def load_mcore_model_weights(model_path: str, mcore_model: list[GPTModel], local
         dist_print("State dicts match!")
     check_weights()
 
-    return mcore_model
+    return mcore_model_parts
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
@@ -273,15 +270,15 @@ def main(args: Namespace):
 
     init_megatron(args)
 
-    mcore_model = create_mcore_model(mcore_config)
+    mcore_model_parts = create_mcore_model(mcore_config)
     hf_model = create_reference_model(hf_config, args)
 
-    check_param_counts(hf_model, mcore_model)
+    check_param_counts(hf_model, mcore_model_parts)
     is_moe = is_qwen3_moe_config(hf_config)
-    local_to_global_maps = create_local_to_global_map(mcore_model)
-    mcore_to_hf_maps = create_mcore_hf_mapping(mcore_model, local_to_global_maps, is_moe=is_moe)
+    local_to_global_maps = create_local_to_global_map(mcore_model_parts)
+    mcore_to_hf_maps = create_mcore_hf_mapping(mcore_model_parts, local_to_global_maps, is_moe=is_moe)
 
-    load_mcore_model_weights(model_path=model_path, mcore_model=mcore_model, local_to_hf_maps=mcore_to_hf_maps)
+    load_mcore_model_weights(model_path=model_path, mcore_model_parts=mcore_model_parts, mcore_to_hf_maps=mcore_to_hf_maps)
     # from mbridge.core.safetensor_io import SafeTensorIO
 
     # is_local_dir = not model_path in QWEN3_MODELS
@@ -307,16 +304,16 @@ def main(args: Namespace):
     
     # loader = ShardLoader(model_cache_dir)
 
-    # assert len(mcore_model) == len(mcore_to_hf_maps)
+    # assert len(mcore_model_parts) == len(mcore_to_hf_maps)
 
     # ref_models = load_mbridge_ref()
     # device_type = next(ref_models[0].parameters()).device.type
 
-    # for model, map in zip(mcore_model, mcore_to_hf_maps):
+    # for model, map in zip(mcore_model_parts, mcore_to_hf_maps):
     #     load_hf_weights(loader, hf_config=hf_config, model=model, local_to_hf_map=map, device=device_type)
 
 
-    # for ref_m, test_m in zip(ref_models, mcore_model):
+    # for ref_m, test_m in zip(ref_models, mcore_model_parts):
     #     ref_devices = get_model_param_devices(ref_m)
     #     test_devices = get_model_param_devices(test_m)
     #     ref_sd = ref_m.state_dict()

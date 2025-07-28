@@ -283,7 +283,7 @@ class ShardLoader:
                     weight_map[k] = shard_path.name
         return weight_map
 
-    def load_hf_weights(
+    def _load_hf_weights(
         self,
         model: GPTModel,
         local_to_hf_map: dict[str, str],
@@ -379,7 +379,12 @@ class ShardLoader:
         # strict must be false because of empty TE states, assign must be True when using init on meta
         model.load_state_dict(new_sd, strict=False, assign=True)
 
-
+    def load_hf_weights(self, mcore_model_parts: list[GPTModel], mcore_to_hf_maps: list[dict[str, str]], device: str = "cuda"):
+        for model, map in zip(mcore_model_parts, mcore_to_hf_maps):
+            self._load_hf_weights(model, map, device)
+    
+        return mcore_model_parts
+    
 def _interleave_and_merge_qkv(
     num_attn_heads, num_kv_heads, hidden_size, head_dim: int, hf_weights: list[torch.Tensor]
 ) -> torch.Tensor:
