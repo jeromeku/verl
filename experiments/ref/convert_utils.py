@@ -1161,6 +1161,7 @@ def check_weights(model_path, mcore_model_parts):
                 #     dist_print(f"tensor mismatch at {k}: {e} != {a}")
                 
     dist_print("State dicts match!")
+    return ref_models
 
 def dist_breakpoint(rank: int = 0):
     if dist.is_initialized() and rank == dist.get_rank():

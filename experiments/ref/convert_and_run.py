@@ -44,7 +44,7 @@ def load_model(hf_model_path):
     return model
 
 
-def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausalLM, max_new_tokens=1):
+def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausalLM, max_new_tokens=1, topk: int = 5):
     """Generate text sequence"""
     tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
 
@@ -59,9 +59,7 @@ def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausa
     cur_position_ids = position_ids
     cur_attention_mask = attention_mask
 
-    from tqdm import trange
-
-    for _ in trange(max_new_tokens):
+    for token_idx in range(max_new_tokens):
         # Move inputs to GPU
         cur_input_ids = cur_input_ids.cuda()
         cur_position_ids = cur_position_ids.cuda()
@@ -74,126 +72,154 @@ def generate_sequence(prompt, model, hf_model_path,  ref_model: Qwen3MoeForCausa
                 cur_input_ids, cur_position_ids, cur_attention_mask
             )
             ref_output = ref_model.forward(cur_input_ids)
+        
         logits: torch.Tensor = output[0].float()
         ref_logits: torch.Tensor = ref_output.logits[0].float()
 
-        _, topk_ids = logits.topk(3, dim=-1)
-        _, ref_topk_ids = ref_logits.topk(3, dim=-1)
-        
-        print("Topk token ids:")
-
+        _, topk_ids = logits.topk(topk, dim=-1)
+        _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
+        total_tokens = logits.shape[0]
+        breakpoint()
         for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):            
             test = test.tolist()
             ref = ref.tolist()
             if set(test) != set(ref):
-                print(f"Topk ids mismatch: {i}: {test} != {ref}")
+                print(f"Topk ids mismatch at generation {token_idx}, token {i} / {total_tokens}: {test} != {ref}")
 
         diff = (logits - ref_logits).abs().max()
         print(f"logits diff: {diff.item():.4f}")
-
 
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Load model and generate text")
     parser.add_argument(
-        "--model_path", type=str, default="Qwen/Qwen3-0.6B", help="HuggingFace model path"
+        "--model_path", type=str, required=True, help="HuggingFace model path"
     )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=1,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument("--topk", type=int, default=5)
     args = parser.parse_args()
 
     # Initialize distributed environment
     init_distributed()
 
     # Load model
-    tracer = configure_tracer()
-    tracer.output_file = "traces/create_model.json"
-    from contextlib import nullcontext
-    from dataclasses import asdict
-    from pprint import pp
+    model = load_model(args.model_path)
+    print(f"Model loaded: {args.model_path}")
 
-    from mbridge.core import Bridge, LLMBridge
-    from megatron.core import parallel_state as mpu
-    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
-    from megatron.core.models.gpt.gpt_model import GPTModel
-    from megatron.core.transformer import TransformerConfig
-    from megatron.core.transformer.module import Float16Module
-    from megatron.core.transformer.moe.moe_layer import MoELayer
-    from megatron.core.transformer.transformer_block import TransformerBlock
-    from megatron.core.transformer.transformer_layer import (
-        TransformerLayer,
-        TransformerLayerSubmodules,
-    )
-    from transformers.configuration_utils import PretrainedConfig
-    from transformers.models.qwen3_moe import Qwen3MoeConfig
-
-    hf_model_path = args.model_path
-    tracer = nullcontext()
-    with tracer:
-
-        bridge: LLMBridge = AutoBridge.from_pretrained(hf_model_path)
-        tf_config: TransformerConfig = bridge.config
-        hf_config: Qwen3MoeConfig = bridge.hf_config
-        
-        print(f"HF Config")
-        pp(hf_config.to_dict())
-        print("TransformerConfig")
-        pp(asdict(tf_config))
-        transformer_spec = get_gpt_decoder_block_spec(tf_config, use_transformer_engine=True)
-       # transformer_spec: TransformerLayerSubmodules = bridge._get_transformer_layer_spec()
-        print("Transformer Layer Spec")
-        pp(asdict(transformer_spec))
-        
-        gpt_args: dict = bridge._get_gptmodel_args()
-        
-        pre_process = mpu.is_pipeline_first_stage()
-        post_process = mpu.is_pipeline_last_stage()
-        
-        with torch.device("cuda"):
-            gpt_model: GPTModel = GPTModel(
-                    config=tf_config,
-                    transformer_layer_spec=transformer_spec,
-                    pre_process=pre_process,
-                    post_process=post_process,
-                    share_embeddings_and_output_weights=hf_config.tie_word_embeddings,
-                    **gpt_args,
-                )  
-        
-        print("GPTModel")
-        print(gpt_model)   
-        decoder: TransformerBlock = gpt_model.decoder     
-        print("Decoder")
-        print(decoder)
-        model: Float16Module = Float16Module(tf_config, gpt_model)
-        print("Float16 wrapped model:")
-        print(model)
-        #model = bridge.get_model()
-        # for name, param in model.named_parameters():
-        #     print(f"{name}: {param.shape=} {param.dtype=}")
-        # for name, buf in model.named_buffers():
-        #     print(f"{name}: {buf.shape} {buf.dtype}")    
-    base_model: GPTModel = model.module
-    block: TransformerBlock = base_model.decoder
-    layer: TransformerLayer = block.layers[0]
-    mlp: MoELayer = layer.mlp
-
-    print(f"{type(layer)}")
-    print(layer)
-    hidden_states = torch.randn(1, 1024, hf_config.hidden_size, dtype=torch.bfloat16, device="cuda")
-    out = mlp.forward(hidden_states) 
-    tracer.output_file = "traces/load_weights.json"
-    
-    # with tracer:
-    #     bridge.load_weights(model, args.model_path)
-    
-    return    
     dtype = next(model[0].parameters()).dtype
     hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map=0, torch_dtype=dtype)
     assert next(hf_model.parameters()).dtype == dtype
     print(f"Model loaded: {args.model_path}")
     print(f"hf_model loaded: {hf_model.device}")
+
     # Generate text
     prompt = "A quick sort in python for me is \n```python\n"
-    generate_sequence(prompt, model, args.model_path, ref_model=hf_model)
-
+    generate_sequence(prompt, model, args.model_path, ref_model=hf_model, topk=args.topk, max_new_tokens=args.max_tokens)
 
 if __name__ == "__main__":
     main()
+
+
+
+
+# def main():
+#     # Parse command line arguments
+#     parser = argparse.ArgumentParser(description="Load model and generate text")
+#     parser.add_argument(
+#         "--model_path", type=str, default="Qwen/Qwen3-0.6B", help="HuggingFace model path"
+#     )
+#     args = parser.parse_args()
+
+#     # Initialize distributed environment
+#     init_distributed()
+
+#     # Load model
+#     # tracer = configure_tracer()
+#     # tracer.output_file = "traces/create_model.json"
+#     from contextlib import nullcontext
+#     from dataclasses import asdict
+#     from pprint import pp
+
+#     from mbridge.core import Bridge, LLMBridge
+#     from megatron.core import parallel_state as mpu
+#     from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+#     from megatron.core.models.gpt.gpt_model import GPTModel
+#     from megatron.core.transformer import TransformerConfig
+#     from megatron.core.transformer.module import Float16Module
+#     from megatron.core.transformer.moe.moe_layer import MoELayer
+#     from megatron.core.transformer.transformer_block import TransformerBlock
+#     from megatron.core.transformer.transformer_layer import (
+#         TransformerLayer,
+#         TransformerLayerSubmodules,
+#     )
+#     from transformers.configuration_utils import PretrainedConfig
+#     from transformers.models.qwen3_moe import Qwen3MoeConfig
+
+#     hf_model_path = args.model_path
+#     tracer = nullcontext()
+#     with tracer:
+
+#         bridge: LLMBridge = AutoBridge.from_pretrained(hf_model_path)
+#         tf_config: TransformerConfig = bridge.config
+#         hf_config: Qwen3MoeConfig = bridge.hf_config
+        
+#         print(f"HF Config")
+#         pp(hf_config.to_dict())
+#         print("TransformerConfig")
+#         pp(asdict(tf_config))
+#         transformer_spec = get_gpt_decoder_block_spec(tf_config, use_transformer_engine=True)
+#        # transformer_spec: TransformerLayerSubmodules = bridge._get_transformer_layer_spec()
+#         print("Transformer Layer Spec")
+#         pp(asdict(transformer_spec))
+        
+#         gpt_args: dict = bridge._get_gptmodel_args()
+        
+#         pre_process = mpu.is_pipeline_first_stage()
+#         post_process = mpu.is_pipeline_last_stage()
+        
+#         with torch.device("cuda"):
+#             gpt_model: GPTModel = GPTModel(
+#                     config=tf_config,
+#                     transformer_layer_spec=transformer_spec,
+#                     pre_process=pre_process,
+#                     post_process=post_process,
+#                     share_embeddings_and_output_weights=hf_config.tie_word_embeddings,
+#                     **gpt_args,
+#                 )  
+        
+#         print("GPTModel")
+#         print(gpt_model)   
+#         decoder: TransformerBlock = gpt_model.decoder     
+#         print("Decoder")
+#         print(decoder)
+#         model: Float16Module = Float16Module(tf_config, gpt_model)
+#         print("Float16 wrapped model:")
+#         print(model)
+#         #model = bridge.get_model()
+#         # for name, param in model.named_parameters():
+#         #     print(f"{name}: {param.shape=} {param.dtype=}")
+#         # for name, buf in model.named_buffers():
+#         #     print(f"{name}: {buf.shape} {buf.dtype}")    
+#     base_model: GPTModel = model.module
+#     block: TransformerBlock = base_model.decoder
+#     layer: TransformerLayer = block.layers[0]
+#     mlp: MoELayer = layer.mlp
+
+#     print(f"{type(layer)}")
+#     print(layer)
+#     hidden_states = torch.randn(1, 1024, hf_config.hidden_size, dtype=torch.bfloat16, device="cuda")
+#     out = mlp.forward(hidden_states) 
+    
+#     dtype = next(model[0].parameters()).dtype
+#     hf_model = AutoModelForCausalLM.from_pretrained(args.model_path, device_map=0, torch_dtype=dtype)
+#     assert next(hf_model.parameters()).dtype == dtype
+#     print(f"Model loaded: {args.model_path}")
+#     print(f"hf_model loaded: {hf_model.device}")
+#     # Generate text
+#     prompt = "A quick sort in python for me is \n```python\n"
+#     generate_sequence(prompt, model, args.model_path, ref_model=hf_model)

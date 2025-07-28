@@ -1,5 +1,6 @@
 import functools
 import json
+import os
 import re
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from megatron.core.transformer.module import Float16Module
 from megatron.training.utils import unwrap_model
 from qwen3_configuration import Qwen3ConfigT
 from safetensors import safe_open
+
+_DEBUG = os.environ.get("DEBUG_MODEL_SHARDING", "0") == "1"
 
 # ---- Weight Conversion ---- #
 
@@ -373,9 +376,11 @@ class ShardLoader:
                 _tp_rank = tp_rank
 
             sharded_weights = _shard_across_tp(local_name, src_param_mcore, param_to_load, _tp_size)
-            from mcore_utils import dist_print
 
-            dist_print(f"{local_name} {_tp_size}: {param_to_load.shape=} {sharded_weights[0].shape=}", rank0_only=True)
+            if _DEBUG:
+                from mcore_utils import dist_print
+                dist_print(f"{local_name} {_tp_size}: {param_to_load.shape=} {sharded_weights[0].shape=}", rank0_only=True)
+
             sharded_weights = [w.to(device) for w in sharded_weights]
             new_sd[local_name] = sharded_weights[_tp_rank]
 

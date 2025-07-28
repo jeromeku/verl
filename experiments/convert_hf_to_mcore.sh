@@ -6,7 +6,7 @@ QWEN3_MOE="assets/qwen3_moe_4layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/
 
 MODEL_ID="${QWEN3_DENSE}"
 
-TP=2
+TP=1
 PP=1
 CP=1
 EP=1
@@ -21,7 +21,7 @@ else
     WORLD_SIZE=${WORLD_SIZE_MOE}
 fi
 
-BACKEND="gloo"
+BACKEND="nccl"
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
 RANK=0

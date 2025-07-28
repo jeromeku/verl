@@ -11,7 +11,7 @@ sys.path.append(MEGATRON_ROOT.resolve().as_posix())
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 
 from megatron.training.arguments import add_megatron_arguments, validate_args
-from megatron.training.global_vars import set_global_variables
+from megatron.training.global_vars import set_global_variables, get_args
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.transformer import TransformerConfig
@@ -20,6 +20,7 @@ from megatron.training.utils import unwrap_model
 from transformers import AutoConfig
 from transformers.models.qwen3 import Qwen3ForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import torch.distributed as dist
 import torch
@@ -203,9 +204,9 @@ def load_mcore_model_weights(
     from ref.convert_utils import check_weights
 
     if perform_check:
-        check_weights(model_path, mcore_model_parts=mcore_model_parts)
+        ref_model = check_weights(model_path, mcore_model_parts=mcore_model_parts)
 
-    return mcore_model_parts
+    return mcore_model_parts, ref_model if perform_check else mcore_model_parts
 
 
 def convert_hf_to_mcore(
@@ -222,15 +223,22 @@ def convert_hf_to_mcore(
     local_to_global_maps = create_local_to_global_map(mcore_model_parts)
     mcore_to_hf_maps = create_mcore_hf_mapping(local_to_global_maps, is_moe=is_moe)
 
-    load_mcore_model_weights(
+    loaded_models = load_mcore_model_weights(
         model_path=model_path,
         mcore_model_parts=mcore_model_parts,
         mcore_to_hf_maps=mcore_to_hf_maps,
         device=device,
-        perform_check=check_weights
+        perform_check=check_weights,
     )
+    
+    if check_weights:
+        mcore_model_parts, ref_models = loaded_models
+    else:
+        mcore_model_parts = loaded_models
 
-    return mcore_config, mcore_model_parts
+    outputs = (mcore_config, mcore_model_parts, ref_models) if check_weights else (mcore_config, mcore_model_parts) 
+    
+    return outputs
 
 
 def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, flops_count: int = 0):
@@ -256,6 +264,92 @@ def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, fl
         tensor_rank=tp_rank,
     )
 
+def reinitialize_rope(mcore_model: McoreModelT, rotary_base: float, device: str = "cuda"):
+    for model in mcore_model:
+        head_dim = model.config.kv_channels
+        if hasattr(model, "rotary_pos_emb") and model.rotary_pos_emb is not None:
+            rotary_emb = model.rotary_pos_emb
+            if rotary_emb.inv_freq.device.type == "meta":
+                rotary_emb.inv_freq = 1 / (rotary_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
+
+def generate_sequence(
+    model: McoreModelT,
+    hf_model_path: str,
+    ref_models = None,
+    prompt: str = "Hello, how are you?  What is your name?",
+    max_new_tokens: int = 1,
+    topk: int = 3,
+):
+    args = get_args()
+    device = next(model[0].parameters()).device.type
+    
+    if args.init_model_with_meta_device:    
+        reinitialize_rope(model, rotary_base=args.rotary_base, device=device)
+
+    if ref_models is not None:
+        ref_sd = ref_models[0].state_dict()
+        test_sd = model[0].state_dict()
+
+        for name, param in ref_sd.items():
+            if "_extra_state" in name:
+                continue
+            assert name in test_sd
+            actual = test_sd[name]
+            assert param.shape == actual.shape
+            assert param.dtype == actual.dtype
+            assert param.device == actual.device
+            assert param.equal(actual), f"{name} mismatch: {(param - actual).abs().max().item():.4f}"
+    
+    breakpoint()
+    tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
+    hf_model = AutoModelForCausalLM.from_pretrained(
+        hf_model_path, device_map=torch.cuda.current_device()
+    )
+
+    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    input_ids = input_ids.cuda()
+    position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+    attention_mask = torch.ones_like(input_ids).to(input_ids.device)
+
+    cur_input_ids = input_ids
+    cur_position_ids = position_ids
+    cur_attention_mask = attention_mask
+
+    for _ in range(max_new_tokens):
+        # Move inputs to GPU
+        cur_input_ids = cur_input_ids.cuda()
+        cur_position_ids = cur_position_ids.cuda()
+        cur_attention_mask = cur_attention_mask.cuda()
+
+        # Forward inference with the model
+        with torch.no_grad():
+            model[0].cuda()
+            output = model[0](cur_input_ids, cur_position_ids, cur_attention_mask)
+            ref_output = hf_model.forward(cur_input_ids)
+            if ref_models is not None:
+                ref_models[0].cuda()
+                ref_gpt_output = ref_models[0](cur_input_ids, cur_position_ids, cur_attention_mask)
+                ref_gpt_logits = ref_gpt_output[0].float()
+                _, ref_gpt_topk = ref_gpt_logits.topk(topk, dim=-1)
+                ref_diff = (ref_gpt_logits - output[0].float()).abs().max()
+        breakpoint()
+        logits: torch.Tensor = output[0].float()
+        ref_logits: torch.Tensor = ref_output.logits[0].float()
+
+        diff = (logits - ref_logits).abs().max()
+        dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
+        
+        _, topk_ids = logits.topk(topk, dim=-1)
+        _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
+
+        num_tokens = logits.shape[0]
+        for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
+            test = test.tolist()
+            ref = ref.tolist()
+            if set(test) != set(ref):
+                dist_print(f"Topk ids mismatch at token {i + 1} / {num_tokens}: {test} != {ref}", rank0_only=True)
+
+
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
@@ -263,7 +357,6 @@ def main(args: Namespace):
 
     # TODO: add requirement for ep and seq_par
     sequence_parallel = args.sequence_parallel or args.tensor_model_parallel_size > 1
-
 
     parallel_config = ParallelismConfig(
         tensor_model_parallel_size=args.tensor_model_parallel_size,
@@ -282,7 +375,7 @@ def main(args: Namespace):
         parallelism_config=parallel_config,
         perform_initialization=args.perform_initialization,
         use_cpu_initialization=args.use_cpu_initialization,
-        init_model_with_meta_device=args.init_model_with_meta_device
+        init_model_with_meta_device=args.init_model_with_meta_device,
     )
 
     if dist.is_initialized() and dist.get_rank() == 0 or not dist.is_initialized():
@@ -292,10 +385,19 @@ def main(args: Namespace):
 
     init_megatron(args)
 
-    mcore_config, mcore_model_parts = convert_hf_to_mcore(
-        qwen_config, model_path, check_weights=True
+    check_weights = True
+    outputs = convert_hf_to_mcore(
+        qwen_config, model_path, check_weights=check_weights
     )
-    #save_local_checkpoint(mcore_model_parts)
+
+    if check_weights:
+        mcore_config, mcore_model_parts, ref_models = outputs
+    else:
+        mcore_config, mcore_model_parts = outputs
+        ref_models = None
+
+    generate_sequence(model=mcore_model_parts, hf_model_path=model_path, ref_models=ref_models)
+    # save_local_checkpoint(mcore_model_parts)
 
 
 if __name__ == "__main__":

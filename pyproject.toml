@@ -44,7 +44,7 @@ dependencies = [
 #   pip install .[megatron]
 # works outside of uv.
 megatron = ["megatron-core", "mbridge"]
-
+dev = ["pytest", "accelerate"]
 
 # -------------------------------------------------------------------
 #  setuptools extras
