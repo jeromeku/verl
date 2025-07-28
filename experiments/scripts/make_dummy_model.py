@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import torch
 from transformers import AutoConfig, AutoTokenizer
@@ -8,6 +9,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_layers", type=int, default=1)
     parser.add_argument("--num_experts", type=int, default=None)
+    parser.add_argument("--save_dir", default="assets")
     args = parser.parse_args()
 
     num_layers = args.num_layers 
@@ -16,7 +18,8 @@ if __name__ == "__main__":
     config: Qwen3MoeConfig = AutoConfig.from_pretrained(MODEL_ID)
     num_experts = args.num_experts or config.num_experts
 
-    SAVE_PATH = f"assets/qwen3_moe_{num_layers}layer_{num_experts}experts"
+    os.makedirs(args.save_dir, exist_ok=True)    
+    SAVE_PATH = f"{args.save_dir}/qwen3_moe_{num_layers}layer_{num_experts}experts"
     
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
     tokenizer.save_pretrained(SAVE_PATH)
