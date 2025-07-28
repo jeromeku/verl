@@ -344,32 +344,12 @@ def generate_sequence(
 
         logits: torch.Tensor = output[0].float()
         ref_logits: torch.Tensor = ref_output.logits[0].float()
-        full_logits = torch.zeros(*ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype)
-        dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
-        full_logits = full_logits.T
-        dist_print(f"{full_logits.shape=} {ref_logits.shape=}", rank0_only=True)
-        full_logits_diff = (full_logits - ref_logits).abs().max()
-        dist_print(f"{full_logits_diff.item()=:.4f}", rank0_only=True)
-        _, full_logits_topk = full_logits.topk(topk, dim=-1)
-        _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
-        num_tokens = ref_logits.shape[0]
-
-        for i, (test, ref) in enumerate(zip(full_logits_topk, ref_topk_ids)):
-            test = test.tolist()
-            ref = ref.tolist()
-            if set(test) != set(ref):
-                dist_print(f"Full topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}")
 
         if tp_size > 1:
-            partition_dim = _find_partition_dim(logits.shape, ref_logits.shape)
-            rank_offset = logits.shape[partition_dim] * tp_rank
-
-            dist_print(f"{partition_dim=} {rank_offset=} {ref_logits.shape=} {logits.shape=}")
-            ref_logits = ref_logits.chunk(tp_size, dim=partition_dim)[tp_rank]
-            assert logits.shape == ref_logits.shape, f"logits shape mismatch: {logits.shape} != {ref_logits.shape}"
-        else:
-            rank_offset = 0
-
+            full_logits = torch.zeros(*ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype)
+            dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
+            logits = full_logits.T
+            
         diff = (logits - ref_logits).abs().max()
         dist_print(f"logits diff: {diff.item():.4f}")
         
@@ -378,8 +358,8 @@ def generate_sequence(
 
         num_tokens = logits.shape[0]
         for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
-            test = (test + rank_offset).tolist()
-            ref = (ref + rank_offset).tolist()
+            test = test.tolist()
+            ref = ref.tolist()
             if set(test) != set(ref):
                 dist_print(f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}")
 
