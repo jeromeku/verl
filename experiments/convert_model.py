@@ -191,46 +191,9 @@ def load_mcore_model_weights(model_path: str, mcore_model_parts: list[GPTModel],
     assert len(mcore_model_parts) == len(mcore_to_hf_maps)
 
     loader.load_hf_weights(mcore_model_parts, mcore_to_hf_maps, device=device)
+    from ref.convert_utils import check_weights
 
-    def check_weights():
-    
-        def load_mbridge_ref():
-            from mbridge import AutoBridge
-
-            bridge = AutoBridge.from_pretrained(model_path)
-            bridge.config.perform_initialization = False
-            bridge.config.use_cpu_initialization = True
-            ref_models = bridge.get_model(use_cpu_initialization=True)
-            bridge.load_weights(ref_models, model_path)
-        
-            return ref_models
-        
-        ref_models = load_mbridge_ref()
-
-        for ref_m, test_m in zip(ref_models, mcore_model_parts):
-            ref_devices = get_model_param_devices(ref_m)
-            test_devices = get_model_param_devices(test_m)
-            ref_sd = ref_m.state_dict()
-            test_sd = test_m.state_dict()
-
-            if ref_sd.keys() != test_sd.keys():
-                breakpoint()
-
-            for k in ref_sd.keys():
-                if "_extra_state" in k:
-                    continue
-
-                expected = ref_sd[k]
-                actual = test_sd[k].to(expected.device)
-
-                if expected is None:
-                    breakpoint()
-
-                if not expected.equal(actual):
-                    breakpoint()
-
-        dist_print("State dicts match!")
-    check_weights()
+    check_weights(model_path, mcore_model_parts=mcore_model_parts)
 
     return mcore_model_parts
 

@@ -1109,3 +1109,40 @@ def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
         time.sleep(rank * delay)
 
     print(f"{rank=}:", *msg, flush=True)
+
+def check_weights(model_path, mcore_model_parts):
+
+    def load_mbridge_ref():
+        from mbridge import AutoBridge
+
+        bridge = AutoBridge.from_pretrained(model_path)
+        bridge.config.perform_initialization = False
+        bridge.config.use_cpu_initialization = True
+        ref_models = bridge.get_model(use_cpu_initialization=True)
+        bridge.load_weights(ref_models, model_path)
+    
+        return ref_models
+    
+    ref_models = load_mbridge_ref()
+
+    for ref_m, test_m in zip(ref_models, mcore_model_parts):
+        ref_sd = ref_m.state_dict()
+        test_sd = test_m.state_dict()
+
+        if ref_sd.keys() != test_sd.keys():
+            breakpoint()
+
+        for k in ref_sd.keys():
+            if "_extra_state" in k:
+                continue
+
+            expected = ref_sd[k]
+            actual = test_sd[k].to(expected.device)
+
+            if expected is None:
+                breakpoint()
+
+            if not expected.equal(actual):
+                breakpoint()
+
+    dist_print("State dicts match!")
