@@ -7,3 +7,6 @@
 [submodule "experiments/thirdparty/transformerengine"]
 	path = thirdparty/transformerengine
 	url = https://github.com/jeromeku/transformerengine
+[submodule "thirdparty/transformerengine"]
+	path = thirdparty/transformerengine
+	url = https://github.com/jeromeku/transformerengine

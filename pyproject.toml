@@ -6,7 +6,10 @@ requires = [
   "setuptools>=61.0",
   "wheel",
   "torch",          # resolved from the CUDA 12.8 index below
-  "transformers"
+  "transformers",
+  "pybind11",
+  "cmake",
+  "ninja"
 ]
 build-backend = "setuptools.build_meta"
 
