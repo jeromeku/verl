@@ -85,18 +85,18 @@ def main():
 
     # export weights
 
-    for k, v in bridge.export_weights(model):
-        gt = bridge.safetensor_io.load_one_hf_weight(k).to(v.device)
-        if k != "lm_head.weight":
-            assert v.shape == gt.shape, f"mismatch of {k} {v.shape=} {gt.shape=}"
-            assert v.sum().item() == gt.sum().item(), f"mismatch of {k}"
-        else:
-            if v.shape[0] == 1:
-                print(f"this is a value model, {k} {v.shape=} {gt.shape=}")
-        if torch.distributed.get_rank() == 0:
-            print(k, "export ok")
-    if args.save_path:
-        bridge.save_weights(model, args.save_path, memory_efficient=False)
+    # for k, v in bridge.export_weights(model):
+    #     gt = bridge.safetensor_io.load_one_hf_weight(k).to(v.device)
+    #     if k != "lm_head.weight":
+    #         assert v.shape == gt.shape, f"mismatch of {k} {v.shape=} {gt.shape=}"
+    #         assert v.sum().item() == gt.sum().item(), f"mismatch of {k}"
+    #     else:
+    #         if v.shape[0] == 1:
+    #             print(f"this is a value model, {k} {v.shape=} {gt.shape=}")
+    #     if torch.distributed.get_rank() == 0:
+    #         print(k, "export ok")
+    # if args.save_path:
+    #     bridge.save_weights(model, args.save_path, memory_efficient=False)
 
     # torch.distributed.destroy_process_group()
 

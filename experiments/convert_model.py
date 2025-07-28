@@ -31,7 +31,7 @@ from mcore_utils import (
     dist_print,
     get_model_provider_func,
     get_model,
-    McoreModelT
+    McoreModelT,
 )
 from qwen3_configuration import (
     QWEN3_MOE_MODELS,
@@ -40,11 +40,12 @@ from qwen3_configuration import (
     ParallelismConfig,
     Qwen3ModelT,
     is_qwen3_moe_config,
-    QWEN3_MODELS
+    QWEN3_MODELS,
 )
 from debugging import get_model_param_devices, get_total_params, get_module_param_count
 from ref.convert_utils import _weight_name_mapping_mcore_local_to_global
 from weight_conversion import remap_param_names_for_ep_pp, map_mcore_hf_param_names, ShardLoader
+
 
 def init_megatron(args, seed: int = 1234):
     init_distributed(backend=args.backend, world_size=args.world_size, rank=args.rank)
@@ -96,7 +97,6 @@ def create_reference_model(config: Qwen3ConfigT, args: Namespace) -> Qwen3ModelT
 
 
 def update_args_for_model_loading(args: Namespace):
-
     init_on_meta = args.init_model_with_meta_device
     use_cpu_initialization = args.use_cpu_initialization
 
@@ -140,6 +140,7 @@ def check_param_counts(hf_model: Qwen3ModelT, mcore_model_parts: McoreModelT):
             f"Param count mismatch: {hf_param_count} != {mcore_param_count}"
         )
 
+
 def create_local_to_global_map(mcore_model_parts: McoreModelT) -> dict[str, str]:
     local_to_global_maps = []
 
@@ -157,9 +158,11 @@ def create_local_to_global_map(mcore_model_parts: McoreModelT) -> dict[str, str]
 
     return local_to_global_maps
 
+
 def create_mcore_hf_mapping(local_to_global_map: dict[str, str], is_moe: bool) -> dict[str, str]:
     from ref.convert_utils import _local_to_hf
-#
+
+    #
     mcore_to_hf_maps = []
     for m in local_to_global_map:
         ref = _local_to_hf(m, is_moe=is_moe)
@@ -170,30 +173,44 @@ def create_mcore_hf_mapping(local_to_global_map: dict[str, str], is_moe: bool) -
 
     return mcore_to_hf_maps
 
+
 def get_model_cache(model_path: str) -> str:
     is_local_dir = not model_path in QWEN3_MODELS
     if not is_local_dir:
         from huggingface_hub import snapshot_download
+
         model_cache_dir = snapshot_download(model_path)
     else:
         model_cache_dir = model_path
 
     return model_cache_dir
 
-def load_mcore_model_weights(model_path: str, mcore_model_parts: McoreModelT, mcore_to_hf_maps: list[dict[str, str]], device: str = "cuda"):
+
+def load_mcore_model_weights(
+    model_path: str,
+    mcore_model_parts: McoreModelT,
+    mcore_to_hf_maps: list[dict[str, str]],
+    device: str = "cuda",
+    perform_check: bool = True,
+):
     model_cache_dir = get_model_cache(model_path)
 
     loader = ShardLoader(model_cache_dir)
     assert len(mcore_model_parts) == len(mcore_to_hf_maps)
 
     loader.load_hf_weights(mcore_model_parts, mcore_to_hf_maps, device=device)
-    
+
     from ref.convert_utils import check_weights
-    check_weights(model_path, mcore_model_parts=mcore_model_parts)
+
+    if perform_check:
+        check_weights(model_path, mcore_model_parts=mcore_model_parts)
 
     return mcore_model_parts
 
-def convert_hf_to_mcore(qwen_config: Qwen3MCoreConfig, model_path: str) -> tuple[TransformerConfig, McoreModelT]:
+
+def convert_hf_to_mcore(
+    qwen_config: Qwen3MCoreConfig, model_path: str, device: str = "cuda", check_weights: bool = True
+) -> tuple[TransformerConfig, McoreModelT]:
     mcore_config: TransformerConfig = qwen_config.to_mcore()
     hf_config: Qwen3ConfigT = qwen_config.hf_config
 
@@ -205,15 +222,48 @@ def convert_hf_to_mcore(qwen_config: Qwen3MCoreConfig, model_path: str) -> tuple
     local_to_global_maps = create_local_to_global_map(mcore_model_parts)
     mcore_to_hf_maps = create_mcore_hf_mapping(local_to_global_maps, is_moe=is_moe)
 
-    load_mcore_model_weights(model_path=model_path, mcore_model_parts=mcore_model_parts, mcore_to_hf_maps=mcore_to_hf_maps)
+    load_mcore_model_weights(
+        model_path=model_path,
+        mcore_model_parts=mcore_model_parts,
+        mcore_to_hf_maps=mcore_to_hf_maps,
+        device=device,
+        perform_check=check_weights
+    )
 
     return mcore_config, mcore_model_parts
+
+
+def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, flops_count: int = 0):
+    from megatron.training.checkpointing import save_checkpoint
+    from megatron.core import mpu
+
+    pp_rank = mpu.get_pipeline_model_parallel_rank()
+    vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+    ep_rank = mpu.get_expert_model_parallel_rank()
+    pipeline_parallel = mpu.get_pipeline_model_parallel_world_size() > 1
+    expert_parallel = mpu.get_expert_model_parallel_world_size() > 1
+    save_checkpoint(
+        iteration,
+        mcore_model_parts,
+        None,  # optimizer
+        None,  # scheduler
+        num_floating_point_operations_so_far=flops_count,
+        pipeline_rank=pp_rank,
+        pipeline_parallel=pipeline_parallel,
+        expert_rank=ep_rank,
+        expert_parallel=expert_parallel,
+        tensor_rank=tp_rank,
+    )
+
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
     model_path = args.model_id
 
+    # TODO: add requirement for ep and seq_par
     sequence_parallel = args.sequence_parallel or args.tensor_model_parallel_size > 1
+
 
     parallel_config = ParallelismConfig(
         tensor_model_parallel_size=args.tensor_model_parallel_size,
@@ -222,7 +272,7 @@ def main(args: Namespace):
         context_parallel_size=args.context_parallel_size,
         expert_model_parallel_size=args.expert_model_parallel_size,
         expert_tensor_parallel_size=args.expert_tensor_parallel_size,
-        sequence_parallel=sequence_parallel
+        sequence_parallel=sequence_parallel,
     )
 
     hf_config = AutoConfig.from_pretrained(model_path)
@@ -232,6 +282,7 @@ def main(args: Namespace):
         parallelism_config=parallel_config,
         perform_initialization=args.perform_initialization,
         use_cpu_initialization=args.use_cpu_initialization,
+        init_model_with_meta_device=args.init_model_with_meta_device
     )
 
     if dist.is_initialized() and dist.get_rank() == 0 or not dist.is_initialized():
@@ -239,10 +290,13 @@ def main(args: Namespace):
 
     args = qwen_config.update_mcore_args(args)
 
-
     init_megatron(args)
 
-    mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
+    mcore_config, mcore_model_parts = convert_hf_to_mcore(
+        qwen_config, model_path, check_weights=True
+    )
+    #save_local_checkpoint(mcore_model_parts)
+
 
 if __name__ == "__main__":
     parser = ArgumentParser(

@@ -234,6 +234,7 @@ class Qwen3MCoreConfig:
     # Disable gpu init and tensor parallel CUDA RNG tracker    
     perform_initialization: bool = False
     use_cpu_initialization: bool = False
+    init_model_with_meta_device: bool = False
 
     # Optional configs, primarily for optimization
     moe_opt_config: MoeOptConfig = None
@@ -260,6 +261,7 @@ class Qwen3MCoreConfig:
         precision_config: PrecisionConfig = PrecisionConfig(),
         perform_initialization: bool = False,
         use_cpu_initialization: bool = False,
+        init_model_with_meta_device: bool = False,
     ):
         arch_config = ArchConfig.from_hf(config)
         if is_qwen3_moe_config(config):
@@ -280,6 +282,7 @@ class Qwen3MCoreConfig:
             use_transformer_engine=use_transformer_engine,
             perform_initialization=perform_initialization,
             use_cpu_initialization=use_cpu_initialization,
+            init_model_with_meta_device=init_model_with_meta_device,
             # Transformer Config
             arch_config=arch_config,
             attn_config=attn_config,
@@ -312,6 +315,7 @@ class Qwen3MCoreConfig:
             **self.to_dict(transformer_config_only=True),
             perform_initialization=self.perform_initialization,
             use_cpu_initialization=self.use_cpu_initialization,
+            init_model_with_meta_device=self.init_model_with_meta_device,
             **kwargs,
         )
 

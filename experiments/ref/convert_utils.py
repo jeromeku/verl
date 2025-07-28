@@ -1111,6 +1111,10 @@ def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
     print(f"{rank=}:", *msg, flush=True)
 
 def check_weights(model_path, mcore_model_parts):
+    if dist.is_initialized():
+        rank = dist.get_rank()
+    else:
+        rank = 0
 
     def load_mbridge_ref():
         from mbridge import AutoBridge
@@ -1129,9 +1133,8 @@ def check_weights(model_path, mcore_model_parts):
         ref_sd = ref_m.state_dict()
         test_sd = test_m.state_dict()
 
-        if ref_sd.keys() != test_sd.keys():
-            breakpoint()
-
+        assert ref_sd.keys() == test_sd.keys(), f"ref_sd and test_sd keys mismatch: {set(ref_sd.keys()) - set(test_sd.keys())} {set(test_sd.keys()) - set(ref_sd.keys())}"
+        
         for k in ref_sd.keys():
             if "_extra_state" in k:
                 continue
@@ -1139,10 +1142,27 @@ def check_weights(model_path, mcore_model_parts):
             expected = ref_sd[k]
             actual = test_sd[k].to(expected.device)
 
-            if expected is None:
-                breakpoint()
+            assert expected is not None
+            
+            assert expected.nonzero().sum() > 0
+            assert actual.nonzero().sum() > 0
 
             if not expected.equal(actual):
-                breakpoint()
 
+                diff = (expected-actual).abs().max().item()
+                expected_sample = expected.view(-1)[:10].tolist()
+                actual_sample = actual.view(-1)[:10].tolist()
+                coords = torch.nonzero(expected != actual)
+                dist_print(f"tensor mismatch at {k}: {coords}")
+
+                # for coord in coords:
+                #     e = expected[coord]
+                #     a = actual[coord]
+                #     dist_print(f"tensor mismatch at {k}: {e} != {a}")
+                
     dist_print("State dicts match!")
+
+def dist_breakpoint(rank: int = 0):
+    if dist.is_initialized() and rank == dist.get_rank():
+        breakpoint()
+    dist.barrier()

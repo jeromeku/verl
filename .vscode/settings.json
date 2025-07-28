@@ -16,7 +16,10 @@
         "/home/jeromeku/verl/thirdparty/mbridge",
         "/home/jeromeku/verl/thirdparty/megatron-lm",
         "/home/jeromeku/verl/thirdparty/transformerengine",
-        "/home/jeromeku/verl/thirdparty/TensorRT-Model-Optimizer"
+        "/home/jeromeku/verl/thirdparty/TensorRT-Model-Optimizer",
+        "/home/jeromeku/jk/verl/thirdparty/mbridge",
+        "/home/jeromeku/jk/verl/thirdparty/megatron-lm",
+        "/home/jeromeku/jk/verl/thirdparty/transformerengine"
     ],
     "[shellscript]": {
   "editor.defaultFormatter": "foxundermoon.shell-format"

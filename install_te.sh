@@ -1,4 +1,6 @@
 #!/bin/bash
+# Ensure python dev headers are installed
+# CUDA_HOME / CUDACXX set
 current_file=`realpath $0`
 current_dir=`dirname ${current_file}`
 

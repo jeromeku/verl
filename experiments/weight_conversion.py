@@ -23,8 +23,8 @@ MCORE_ATTN_QKV_PAT = f"{MCORE_ATTN_PAT}.{MCORE_QKV_PAT}"
 
 MCORE_MLP_PAT = "mlp"
 MCORE_MLP_FC_PAT = "linear_fc"
-MCORE_MLP_FC1_PAT = f"{MCORE_MLP_FC_PAT}1"
-MCORE_MLP_FC2_PAT = f"{MCORE_MLP_FC_PAT}2"
+MCORE_MLP_FC1_PAT = f"{MCORE_MLP_FC_PAT}1.weight"
+MCORE_MLP_FC2_PAT = f"{MCORE_MLP_FC_PAT}2.weight"
 MCORE_EXPERTS_PAT = "experts"
 MCORE_EXPERTS_FC_PAT = f"{MCORE_MLP_PAT}.{MCORE_EXPERTS_PAT}.{MCORE_MLP_FC_PAT}"
 
@@ -373,13 +373,16 @@ class ShardLoader:
                 _tp_rank = tp_rank
 
             sharded_weights = _shard_across_tp(local_name, src_param_mcore, param_to_load, _tp_size)
+            from mcore_utils import dist_print
+
+            dist_print(f"{local_name} {_tp_size}: {param_to_load.shape=} {sharded_weights[0].shape=}", rank0_only=True)
             sharded_weights = [w.to(device) for w in sharded_weights]
             new_sd[local_name] = sharded_weights[_tp_rank]
 
         # strict must be false because of empty TE states, assign must be True when using init on meta
         model.load_state_dict(new_sd, strict=False, assign=True)
 
-    def load_hf_weights(self, mcore_model_parts: list[GPTModel], mcore_to_hf_maps: list[dict[str, str]], device: str = "cuda"):
+    def load_hf_weights(self, mcore_model_parts: list[GPTModel], mcore_to_hf_maps: list[dict[str, str]], device: str = "cpu"):
         for model, map in zip(mcore_model_parts, mcore_to_hf_maps):
             self._load_hf_weights(model, map, device)
     
