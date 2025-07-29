@@ -351,6 +351,9 @@ class Qwen3MCoreConfig:
         if isinstance(self.mlp_config, MoeConfig):
             args.num_experts = self.mlp_config.num_moe_experts
 
+        # Other parallelism args set through CLI, VPP will be automatically set in validate_args
+        args.sequence_parallel = self.parallelism_config.sequence_parallel
+
         return args
 
 

@@ -111,6 +111,8 @@ def update_args_for_model_loading(args: Namespace):
         [use_cpu_initialization, args.init_model_with_meta_device, args.finetune]
     )
 
+    # This is actually not needed, since `validate_args` will automatically configure vpp_size
+
     # VPP configuration, see megatron-lm/megatron/training/arguments.py
     # VPP_STAGES = NUM_LAYERS // (PP * VPP)
     # Each rank gets VPP_STAGES layers in round robin fashion
@@ -252,33 +254,61 @@ def reinitialize_rope(mcore_model: McoreModelT, rotary_base: float, device: str 
                 )
 
 
+def forward_step_func(data_iterator, model, device: str):
+    def loss_func(output_tensor: torch.Tensor, **kwargs):
+        logits = output_tensor.float()
+
+        return {"logits": logits}
+
+    input_ids, position_ids, attention_mask = next(data_iterator)
+    output_tensor = model(
+        input_ids.to(device),
+        position_ids.to(device),
+        attention_mask.to(device)
+    )
+
+    return output_tensor, loss_func
+
+
 def check_logits(
     mcore_model_parts: McoreModelT,
     model_path: str,
+    num_samples: int = 100,
     prompt_len: int = 100,
     topk: int = 3,
     seed: int = 1234,
 ):
-    assert len(mcore_model_parts) == 1, (
-        f"Logits check not supported for pipeline parallel currently"
-    )
+    from mcore_utils import generate_dataset
 
-    gpt_model = mcore_model_parts[0].cuda()
+    # assert len(mcore_model_parts) == 1, (
+    #     f"Logits check not supported for pipeline parallel currently"
+    # )
 
     args = get_args()
+    gpt_model = mcore_model_parts[0].cuda()
     device = next(gpt_model.parameters()).device.type
     model_parallel_cuda_manual_seed(seed)
 
     if args.init_model_with_meta_device:
-        reinitialize_rope([gpt_model], rotary_base=args.rotary_base, device=device)
+        reinitialize_rope(mcore_model_parts, rotary_base=args.rotary_base, device=device)
 
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_path, device_map=torch.cuda.current_device()
     )
 
-    input_ids = torch.randint(0, args.vocab_size, (1, prompt_len), device=device)
-    position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-    attention_mask = torch.ones_like(input_ids).to(input_ids.device)
+    torch.manual_seed(seed)
+    dataset = generate_dataset(
+        vocab_size=args.vocab_size, num_samples=num_samples, seqlen=prompt_len, batch_size=1
+    )
+    input_ids, position_ids, attention_mask = next(iter(dataset))
+    input_ids, position_ids, attention_mask = (
+        input_ids.to(device),
+        position_ids.to(device),
+        attention_mask.to(device),
+    )
+    # input_ids = torch.randint(0, args.vocab_size, (1, prompt_len), device=device)
+    # position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+    # attention_mask = torch.ones_like(input_ids).to(input_ids.device)
 
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -286,13 +316,33 @@ def check_logits(
     ep_size = mpu.get_expert_model_parallel_world_size()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
 
-    with torch.no_grad():
-        output = gpt_model(input_ids, position_ids, attention_mask)
-        ref_output = hf_model.forward(input_ids)
+    from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+    from functools import partial
+    forward_backward_func = get_forward_backward_func()
+    dist_print(f"{type(forward_backward_func)=}", rank0_only=True)
 
-    logits: torch.Tensor = output[0].float()
+    with torch.no_grad():
+        outputs = forward_backward_func(
+            forward_step_func=partial(forward_step_func, device=device),
+            data_iterator=iter(dataset),
+            model=mcore_model_parts,
+            num_microbatches=1,
+            seq_length=prompt_len,
+            micro_batch_size=1,
+            decoder_seq_length=prompt_len,
+            forward_only=True,
+            collect_non_loss_data=True,
+        )
+    
+        ref_output = hf_model.forward(input_ids)
+    
+    logits = outputs[0]['logits'][0]
     ref_logits: torch.Tensor = ref_output.logits[0].float()
 
+        # output = gpt_model(input_ids, position_ids, attention_mask)
+
+#    logits: torch.Tensor = output[0].float()
+ 
     if tp_size > 1:
         full_logits = torch.zeros(
             *ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype
@@ -312,7 +362,7 @@ def check_logits(
         ref = ref.tolist()
         if set(test) != set(ref):
             dist_print(
-                f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
+                f"Topk @ {topk} ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
                 rank0_only=True,
             )
 
