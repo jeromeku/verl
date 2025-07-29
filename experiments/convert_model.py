@@ -336,12 +336,12 @@ def generate_sequence(
             model[0].cuda()
             output = model[0](cur_input_ids, cur_position_ids, cur_attention_mask)
             ref_output = hf_model.forward(cur_input_ids)
-            if ref_models is not None:
-                ref_models[0].cuda()
-                ref_gpt_output = ref_models[0](cur_input_ids, cur_position_ids, cur_attention_mask)
-                ref_gpt_logits = ref_gpt_output[0].float()
-                _, ref_gpt_topk = ref_gpt_logits.topk(topk, dim=-1)
-                ref_diff = (ref_gpt_logits - output[0].float()).abs().max()
+            # if ref_models is not None:
+            #     ref_models[0].cuda()
+            #     ref_gpt_output = ref_models[0](cur_input_ids, cur_position_ids, cur_attention_mask)
+            #     ref_gpt_logits = ref_gpt_output[0].float()
+            #     _, ref_gpt_topk = ref_gpt_logits.topk(topk, dim=-1)
+            #     ref_diff = (ref_gpt_logits - output[0].float()).abs().max()
 
         logits: torch.Tensor = output[0].float()
         ref_logits: torch.Tensor = ref_output.logits[0].float()
