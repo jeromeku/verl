@@ -24,6 +24,7 @@ from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.training.global_vars import get_args
 from megatron.training.utils import unwrap_model
+from torch.utils.data import DataLoader, TensorDataset
 
 try:
     from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
@@ -339,6 +340,17 @@ def get_model(
 
     return model
 
+
+def generate_dataset(vocab_size: int, num_samples: int = 100, seqlen: int = 100, batch_size: int = 2):
+
+    input_ids = torch.randint(0, vocab_size, (num_samples, seqlen))
+    position_ids = torch.arange(seqlen).expand(num_samples, -1) 
+    attention_mask = torch.ones_like(input_ids)
+
+    dataset = TensorDataset(input_ids, position_ids, attention_mask)
+    data_loader = DataLoader(dataset, batch_size=batch_size)
+    
+    return data_loader
 
 def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
     
