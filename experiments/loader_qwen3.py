@@ -748,15 +748,14 @@ def load_checkpoint(queue, args):
     
     md = build_metadata(margs, dtype=dtype)
     md.checkpoint_args = margs
+    queue.put(md)
+    queue.put("done")
+
     from pprint import pprint
     pprint(vars(md))
 
     if False:
 
-        # Send metadata
-        md = build_metadata(config, dtype)
-        md.checkpoint_args = margs
-        queue.put(md)
 
         # Send embeddings
         embeddings_msg = {
