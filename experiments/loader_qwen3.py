@@ -263,127 +263,134 @@ def setup_megatron_args(args):
     return sys.argv
 
 
-def configure_megatron_args(margs, config, dtype):
+def configure_megatron_args(margs):
     """Configure Megatron args from HuggingFace config."""
     # Set model configuration from HF config
     from megatron.core.enums import ModelType
 
     margs.model_type = ModelType.encoder_or_decoder
 
-    # Core model dimensions
-    margs.num_layers = config.num_hidden_layers
-    margs.hidden_size = config.hidden_size
-    margs.ffn_hidden_size = config.intermediate_size
-    margs.num_attention_heads = config.num_attention_heads
-    margs.num_query_groups = config.num_key_value_heads
-    # Qwen-3 uses fixed per-head dimension defined by `head_dim` in its config.
-    margs.kv_channels = getattr(
-        config, "head_dim", config.hidden_size // config.num_attention_heads
-    )
+    # # Core model dimensions
+    # margs.num_layers = config.num_hidden_layers
+    # margs.hidden_size = config.hidden_size
+    # margs.ffn_hidden_size = config.intermediate_size
+    # margs.num_attention_heads = config.num_attention_heads
+    # margs.num_query_groups = config.num_key_value_heads
+    # # Qwen-3 uses fixed per-head dimension defined by `head_dim` in its config.
+    # margs.kv_channels = getattr(
+    #     config, "head_dim", config.hidden_size // config.num_attention_heads
+    # )
 
-    # Sequence and position settings
-    margs.seq_length = getattr(config, "max_position_embeddings", 40960)
-    margs.max_position_embeddings = getattr(config, "max_position_embeddings", 40960)
-    margs.position_embedding_type = "rope"
-    margs.add_position_embedding = False
-    margs.use_rotary_position_embeddings = True
-    margs.rotary_base = getattr(config, "rope_theta", 1000000)
-    margs.rotary_percent = 1.0
-    margs.rotary_interleaved = False
+    # # Sequence and position settings
+    # margs.seq_length = getattr(config, "max_position_embeddings", 40960)
+    # margs.max_position_embeddings = getattr(config, "max_position_embeddings", 40960)
+    # margs.position_embedding_type = "rope"
+    # margs.add_position_embedding = False
+    # margs.use_rotary_position_embeddings = True
+    # margs.rotary_base = getattr(config, "rope_theta", 1000000)
+    # margs.rotary_percent = 1.0
+    # margs.rotary_interleaved = False
 
-    # Vocab settings
-    margs.vocab_size = config.vocab_size
-    margs.padded_vocab_size = config.vocab_size
-    margs.make_vocab_size_divisible_by = 1
+    # # Vocab settings
+    # margs.vocab_size = config.vocab_size
+    # margs.padded_vocab_size = config.vocab_size
+    # margs.make_vocab_size_divisible_by = 1
     margs.tokenizer_type = "HuggingFaceTokenizer"
 
     # Attention and activation settings
-    margs.group_query_attention = config.num_key_value_heads < config.num_attention_heads
-    margs.swiglu = getattr(config, "hidden_act", "silu") == "silu"
-    margs.normalization = "RMSNorm"
-    margs.norm_epsilon = getattr(config, "rms_norm_eps", 1e-6)
+    # margs.group_query_attention = config.num_key_value_heads < config.num_attention_heads
+    # margs.swiglu = getattr(config, "hidden_act", "silu") == "silu"
+    # margs.normalization = "RMSNorm"
+    # margs.norm_epsilon = getattr(config, "rms_norm_eps", 1e-6)
 
     # Enable Q/K layernorm for Qwen-3 compatibility
-    margs.qk_layernorm = True
+    # margs.qk_layernorm = True
 
     # Bias settings
-    margs.add_bias_linear = getattr(config, "mlp_bias", False)
-    margs.add_qkv_bias = getattr(config, "attention_bias", False)
-    margs.disable_bias_linear = True  # Override - disable bias for modern transformers
+    # margs.add_bias_linear = getattr(config, "mlp_bias", False)
+    # margs.add_qkv_bias = getattr(config, "attention_bias", False)
+    # margs.disable_bias_linear = True  # Override - disable bias for modern transformers
 
     # Training and optimization settings
-    margs.apply_query_key_layer_scaling = False
-    margs.attention_dropout = 0.0
-    margs.hidden_dropout = 0.0
-    margs.squared_relu = False
-    margs.apply_layernorm_1p = False
-    margs.untie_embeddings_and_output_weights = False  # Qwen-3 has tied embeddings
+    # margs.apply_query_key_layer_scaling = False
+    # margs.attention_dropout = 0.0
+    # margs.hidden_dropout = 0.0
+    # margs.squared_relu = False
+    # margs.apply_layernorm_1p = False
+    # margs.untie_embeddings_and_output_weights = False  # Qwen-3 has tied embeddings
 
-    # Required fields from working loaders
-    margs.bert_binary_head = False
+    # # Required fields from working loaders
+    # margs.bert_binary_head = False
     margs.iteration = 1  # Required: '0' and 'release' don't work
-    margs.global_batch_size = 1024
+    # margs.global_batch_size = 1024
 
     # Model parallel configuration
-    margs.tensor_model_parallel_size = 1
-    margs.pipeline_model_parallel_size = 1
-    margs.expert_model_parallel_size = 1
-    margs.virtual_pipeline_model_parallel_size = None
-    margs.sequence_parallel = True  # Enable like working loaders - affects tensor layouts
+    # margs.tensor_model_parallel_size = 1
+    # margs.pipeline_model_parallel_size = 1
+    # margs.expert_model_parallel_size = 1
+    # margs.virtual_pipeline_model_parallel_size = None
+    # margs.sequence_parallel = True  # Enable like working loaders - affects tensor layouts
 
     # MoE configuration
-    margs.num_experts = getattr(config, "num_experts", None)
-    if margs.num_experts:
-        margs.moe_layer_freq = 1
-        margs.moe_ffn_hidden_size = getattr(config, "moe_intermediate_size", None)
-        margs.moe_router_topk = getattr(config, "num_experts_per_tok", 2)
-        margs.moe_token_dispatcher_type = "allgather"
+    # margs.num_experts = getattr(config, "num_experts", None)
+    # if margs.num_experts:
+    #     margs.moe_layer_freq = 1
+    #     margs.moe_ffn_hidden_size = getattr(config, "moe_intermediate_size", None)
+    #     margs.moe_router_topk = getattr(config, "num_experts_per_tok", 2)
+    #     margs.moe_token_dispatcher_type = "allgather"
 
     # Training metadata (fixed duplicate iteration assignment)
     margs.consumed_train_samples = 0
     margs.consumed_valid_samples = 0
 
     # Data types
-    margs.params_dtype = dtype
-    margs.fp16 = dtype == torch.float16
-    margs.bf16 = dtype == torch.bfloat16
+    # margs.params_dtype = dtype
+    # margs.fp16 = dtype == torch.float16
+    # margs.bf16 = dtype == torch.bfloat16
 
     return margs
 
 
-def build_metadata(config, dtype):
+def build_metadata(args, dtype):
     """Build metadata for checkpoint conversion."""
     md = types.SimpleNamespace()
     md.model_type = "GPT"
-    md.num_layers = config.num_hidden_layers
-    md.hidden_size = config.hidden_size
-    md.seq_length = getattr(config, "max_position_embeddings", 40960)
-    md.num_attention_heads = config.num_attention_heads
-    md.kv_channels = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
-    md.num_query_groups = config.num_key_value_heads
-    md.ffn_hidden_size = config.intermediate_size
-    md.max_position_embeddings = getattr(config, "max_position_embeddings", 40960)
-    md.position_embedding_type = "rope"
-    md.tokenizer_type = "HuggingFaceTokenizer"
-    md.iteration = 1
-    md.params_dtype = dtype
-    md.bert_binary_head = False
-    md.output_layer = False  # Qwen-3 has tied embeddings
-    md.linear_bias = getattr(config, "mlp_bias", False)
-    md.qkv_bias = getattr(config, "attention_bias", False)
-    md.norm_has_bias = False  # RMSNorm doesn't have bias
-    md.swiglu = getattr(config, "hidden_act", "silu") == "silu"
+    # md.num_layers = config.num_hidden_layers
+    # md.hidden_size = config.hidden_size
+    # md.seq_length = getattr(config, "max_position_embeddings", 40960)
+    # md.num_attention_heads = config.num_attention_heads
+    # md.kv_channels = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    # md.num_query_groups = config.num_key_value_heads
+    # md.ffn_hidden_size = config.intermediate_size
+    # md.max_position_embeddings = getattr(config, "max_position_embeddings", 40960)
+    # md.position_embedding_type = "rope"
+    # md.tokenizer_type = "HuggingFaceTokenizer"
+    # md.iteration = 1
+    # md.params_dtype = dtype
+    # md.output_layer = False  # Qwen-3 has tied embeddings
+    # md.linear_bias = getattr(config, "mlp_bias", False)
+    # md.qkv_bias = getattr(config, "attention_bias", False)
+    # md.norm_has_bias = False  # RMSNorm doesn't have bias
+    # md.swiglu = getattr(config, "hidden_act", "silu") == "silu"
     # Enable Q/K layernorm for Qwen-3
-    md.qk_layernorm = True
+    # md.qk_layernorm = True
+    # md.true_vocab_size = config.vocab_size
+    # md.vocab_size = config.vocab_size
+    # md.padded_vocab_size = config.vocab_size
+    # md.make_vocab_size_divisible_by = 1
+    # md.num_experts = getattr(config, "num_experts", None) or 0
+    
+    # Pass in all prior model and global configs
+    for k, v in vars(args).items():
+        setattr(md, k, v)
+
+    md.output_layer = args.untie_embeddings_and_output_weights
+    md.true_vocab_size = args.vocab_size
+    md.bert_binary_head = False
     md.previous_tensor_parallel_size = 1
     md.previous_pipeline_parallel_size = 1
-    md.true_vocab_size = config.vocab_size
-    md.vocab_size = config.vocab_size
-    md.padded_vocab_size = config.vocab_size
-    md.make_vocab_size_divisible_by = 1
     md.consumed_train_samples = 0
     md.consumed_valid_samples = 0
-    md.num_experts = getattr(config, "num_experts", None) or 0
     md.checkpoint_args = None  # Will be set by caller if needed
 
     return md
@@ -662,8 +669,6 @@ def load_checkpoint(queue, args):
     for k,v in vars(args).items():
         if hasattr(margs, k):
             setattr(margs, k, v)
-
-#    margs.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     
     model_path = args.model_name
     hf_config = AutoConfig.from_pretrained(model_path)
@@ -692,7 +697,6 @@ def load_checkpoint(queue, args):
     else:
         moe_opt_config = None
 
-    breakpoint()
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
         parallelism_config=parallel_config,
@@ -706,7 +710,7 @@ def load_checkpoint(queue, args):
     margs = qwen_config.update_mcore_args(margs)
 
     # Set up Megatron arguments
-    # margs = configure_megatron_args(margs, config, dtype)
+    margs = configure_megatron_args(margs)
 
     # Validate args
     # See parallel_state -- needed for MoE parallel folding, which reuses TP / CP group for EP / ETP
@@ -718,30 +722,36 @@ def load_checkpoint(queue, args):
         * margs.expert_tensor_parallel_size
         * margs.pipeline_model_parallel_size,
     )
-    breakpoint()
+    
     margs = validate_args(margs)
+    module.MegatronModule.embedding_warning_printed = True
+    set_global_variables(margs, build_tokenizer=False)
+ 
+    mpu.set_tensor_model_parallel_world_size(margs.tensor_model_parallel_size)
+    mpu.set_pipeline_model_parallel_world_size(margs.pipeline_model_parallel_size)
+    mpu.set_virtual_pipeline_model_parallel_world_size(
+        margs.virtual_pipeline_model_parallel_size
+    )
+    mpu.set_expert_model_parallel_world_size(margs.expert_model_parallel_size)
+    mpu.set_expert_tensor_parallel_world_size(margs.expert_tensor_parallel_size)
+
+    # Fake process groups for conversion
+    fake_tp_group = _ConverterFakeProcessGroup(size=margs.tensor_model_parallel_size)
+    fake_ep_group = _ConverterFakeProcessGroup(size=margs.expert_model_parallel_size)
+    fake_etp_group = _ConverterFakeProcessGroup(size=margs.expert_tensor_parallel_size)
+
+    mpu._TENSOR_MODEL_PARALLEL_GROUP = fake_tp_group
+    mpu._EXPERT_MODEL_PARALLEL_GROUP = fake_ep_group
+    mpu._EXPERT_TENSOR_PARALLEL_GROUP = fake_etp_group
+    fused_kernels.load(margs)
+    dtype = qwen_config.precision_config.params_dtype
+    
+    md = build_metadata(margs, dtype=dtype)
+    md.checkpoint_args = margs
+    from pprint import pprint
+    pprint(vars(md))
 
     if False:
-        # Initialize Megatron environment
-        module.MegatronModule.embedding_warning_printed = True
-        set_global_variables(margs, build_tokenizer=False)
-        mpu.set_tensor_model_parallel_world_size(margs.tensor_model_parallel_size)
-        mpu.set_pipeline_model_parallel_world_size(margs.pipeline_model_parallel_size)
-        mpu.set_virtual_pipeline_model_parallel_world_size(
-            margs.virtual_pipeline_model_parallel_size
-        )
-        mpu.set_expert_model_parallel_world_size(margs.expert_model_parallel_size)
-        mpu.set_expert_tensor_parallel_world_size(margs.expert_tensor_model_parallel_size)
-
-        # Fake process groups for conversion
-        fake_tp_group = _ConverterFakeProcessGroup(size=margs.tensor_model_parallel_size)
-        fake_ep_group = _ConverterFakeProcessGroup(size=margs.expert_model_parallel_size)
-        fake_etp_group = _ConverterFakeProcessGroup(size=margs.expert_tensor_model_parallel_size)
-
-        mpu._TENSOR_MODEL_PARALLEL_GROUP = fake_tp_group
-        mpu._EXPERT_MODEL_PARALLEL_GROUP = fake_ep_group
-        mpu._EXPERT_TENSOR_PARALLEL_GROUP = fake_etp_group
-        fused_kernels.load(margs)
 
         # Send metadata
         md = build_metadata(config, dtype)

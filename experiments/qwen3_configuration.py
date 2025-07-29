@@ -36,9 +36,8 @@ class ConfigBase:
     @classmethod
     def from_args(cls, args: Namespace, **overrides) -> "ConfigBase":
         kwargs = {f.name: getattr(args, f.name) for f in fields(cls) if hasattr(args, f.name)}
-        
+
         # Manually set values, useful for setting sensible / preferred defaults
-        breakpoint()
         for k, v in overrides.items():
             if k in cls.__dataclass_fields__:
                 kwargs[k] = v
@@ -257,6 +256,7 @@ class Qwen3MCoreConfig:
     use_transformer_engine: bool = True
 
     hf_config: Qwen3ConfigT = None
+    is_moe: bool
 
     @classmethod
     def from_hf(
@@ -276,7 +276,9 @@ class Qwen3MCoreConfig:
         init_model_with_meta_device: bool = False,
     ):
         arch_config = ArchConfig.from_hf(config)
-        if is_qwen3_moe_config(config):
+        is_moe = is_qwen3_moe_config(config)
+
+        if is_moe:
             mlp_config = MoeConfig.from_hf(config)
         else:
             mlp_config = MLPConfig()
@@ -305,6 +307,7 @@ class Qwen3MCoreConfig:
             fusion_config=fusion_config,
             activation_recompute_config=activation_recompute_config,
             hf_config=config,
+            is_moe=is_moe,
         )
 
     def to_dict(self, transformer_config_only: bool = False):
@@ -346,24 +349,33 @@ class Qwen3MCoreConfig:
         args.use_cpu_initialization = self.use_cpu_initialization
 
         # Update architecture configs
-        for k, v in self.arch_config.to_dict().items():
-            if hasattr(args, k):
-                setattr(args, k, v)
+        # for k, v in self.arch_config.to_dict().items():
+        #     if hasattr(args, k):
+        #         setattr(args, k, v)
 
-        for k, v in self.attn_config.to_dict().items():
-            if hasattr(args, k):
-                setattr(args, k, v)
+        # for k, v in self.attn_config.to_dict().items():
+        #     if hasattr(args, k):
+        #         setattr(args, k, v)
 
-        for k, v in self.mlp_config.to_dict().items():
-            if hasattr(args, k):
-                setattr(args, k, v)
+        # for k, v in self.mlp_config.to_dict().items():
+        #     if hasattr(args, k):
+        #         setattr(args, k, v)
+
+        for config in [self.arch_config, self.attn_config, self.mlp_config, self.precision_config]:
+            for k, v in config.to_dict().items():
+                if hasattr(args, k):
+                    setattr(args, k, v)
+
+        if self.is_moe:
+            for k, v in self.moe_opt_config.to_dict().items():
+                if hasattr(args, k):
+                    setattr(args, k, v)
 
         # Note that CLI args experts args is `num_experts` whereas TransformerConfig expert arg is `num_moe_experts`
         if isinstance(self.mlp_config, MoeConfig):
             args.num_experts = self.mlp_config.num_moe_experts
 
-        # Other parallelism args set through CLI, VPP will be automatically set in validate_args
-        args.sequence_parallel = self.parallelism_config.sequence_parallel
+        # args.sequence_parallel = self.parallelism_config.sequence_parallel
 
         return args
 
