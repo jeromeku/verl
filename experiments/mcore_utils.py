@@ -347,6 +347,9 @@ def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
         if rank0_only and rank != 0:
             return
         time.sleep(rank * delay)
+    else:
+        rank = 0
+        
     print(f"{rank=}:", *msg, flush=True)
 
 def dist_breakpoint(rank: int = 0):

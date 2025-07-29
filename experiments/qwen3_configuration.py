@@ -343,18 +343,20 @@ class Qwen3MCoreConfig:
         # args.num_attention_heads = self.attn_config.num_attention_heads
         # args.num_query_groups = self.attn_config.num_query_groups
         # args.kv_channels = self.attn_config.kv_channels
+        
         for k, v in self.attn_config.to_dict().items():
             if hasattr(args, k):
                 setattr(args, k, v)
-        
+        from mcore_utils import dist_print
         for k,v in self.mlp_config.to_dict().items():
             if hasattr(args, k):
+                dist_print(f"Updating {k} to {v}", rank0_only=True)
                 setattr(args, k, v)
         
-        # if isinstance(self.mlp_config, MoeConfig):
-        #     args.num_experts = self.mlp_config.num_moe_experts
-        #     args.moe_router_topk = self.mlp_config.moe_router_topk
-
+        # Note that CLI args experts is `num_experts` while TransformerConfig is `num_moe_experts`
+        if isinstance(self.mlp_config, MoeConfig):
+            args.num_experts = self.mlp_config.num_moe_experts
+        
         # Ensure global args match those of internal TransformerConfig
         # for k,v in asdict(self.to_mcore()).items():
         #     if hasattr(args, k) and getattr(args, k) is not None:

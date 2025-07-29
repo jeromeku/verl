@@ -318,6 +318,7 @@ def generate_sequence(
     cur_input_ids = input_ids
     cur_position_ids = position_ids
     cur_attention_mask = attention_mask
+    dist_print(f"{input_ids.shape=}", rank0_only=True)
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -351,7 +352,7 @@ def generate_sequence(
             logits = full_logits.T
             
         diff = (logits - ref_logits).abs().max()
-        dist_print(f"logits diff: {diff.item():.4f}")
+        dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
         
         _, topk_ids = logits.topk(topk, dim=-1)
         _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
@@ -361,15 +362,18 @@ def generate_sequence(
             test = test.tolist()
             ref = ref.tolist()
             if set(test) != set(ref):
-                dist_print(f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}")
+                dist_print(f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}", rank0_only=True)
 
 
 def main(args: Namespace):
     args = update_args_for_model_loading(args)
     model_path = args.model_id
 
-    # TODO: add requirement for ep and seq_par
+    hf_config = AutoConfig.from_pretrained(model_path)
     sequence_parallel = args.sequence_parallel or args.tensor_model_parallel_size > 1
+
+    if is_qwen3_moe_config(hf_config) and args.tensor_model_parallel_size > 1:
+        sequence_parallel = True
 
     parallel_config = ParallelismConfig(
         tensor_model_parallel_size=args.tensor_model_parallel_size,
@@ -380,8 +384,6 @@ def main(args: Namespace):
         expert_tensor_parallel_size=args.expert_tensor_parallel_size,
         sequence_parallel=sequence_parallel,
     )
-
-    hf_config = AutoConfig.from_pretrained(model_path)
 
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
@@ -395,7 +397,7 @@ def main(args: Namespace):
         pprint(qwen_config)
 
     args = qwen_config.update_mcore_args(args)
-
+    
     init_megatron(args)
 
     check_weights = True
