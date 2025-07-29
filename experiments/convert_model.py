@@ -143,35 +143,14 @@ def check_param_counts(hf_model: Qwen3ModelT, mcore_model_parts: McoreModelT):
         )
 
 
-def create_local_to_global_map(mcore_model_parts: McoreModelT) -> dict[str, str]:
-    local_to_global_maps = []
-
-    for m in mcore_model_parts:
-        test = remap_param_names_for_ep_pp(m)
-        ref = _weight_name_mapping_mcore_local_to_global(m)
-        if test != ref:
-            key_diff = set(ref.keys()) - set(ref.keys())
-            val_diff = set(ref.values()) - set(test.values())
-            print(f"{key_diff=}")
-            print(f"{val_diff=}")
-            assert False
-
-        local_to_global_maps.append(test)
+def create_local_to_global_map(mcore_model_parts: McoreModelT) -> list[dict[str, str]]:
+    local_to_global_maps = [remap_param_names_for_ep_pp(m) for m in mcore_model_parts]
 
     return local_to_global_maps
 
 
-def create_mcore_hf_mapping(local_to_global_map: dict[str, str], is_moe: bool) -> dict[str, str]:
-    from ref.convert_utils import _local_to_hf
-
-    #
-    mcore_to_hf_maps = []
-    for m in local_to_global_map:
-        ref = _local_to_hf(m, is_moe=is_moe)
-        test = map_mcore_hf_param_names(m, is_moe=is_moe)
-
-        assert ref == test
-        mcore_to_hf_maps.append(test)
+def create_mcore_hf_mapping(local_to_global_maps: list[dict[str, str]], is_moe: bool) -> dict[str, str]:
+    mcore_to_hf_maps = [map_mcore_hf_param_names(m, is_moe=is_moe) for m in local_to_global_maps]
 
     return mcore_to_hf_maps
 
@@ -205,19 +184,26 @@ def load_mcore_model_weights(
 
 
 def convert_hf_to_mcore(
-    qwen_config: Qwen3MCoreConfig, model_path: str, device: str = "cuda"
+    qwen_config: Qwen3MCoreConfig, model_path: str, device: str = "cuda", check_params: bool = True
 ) -> tuple[TransformerConfig, McoreModelT]:
     mcore_config: TransformerConfig = qwen_config.to_mcore()
     hf_config: Qwen3ConfigT = qwen_config.hf_config
 
     mcore_model_parts = create_mcore_model(mcore_config)
-    hf_model = create_reference_model(hf_config, args)
+    if check_params:
+        hf_model = create_reference_model(hf_config, args)
 
-    check_param_counts(hf_model, mcore_model_parts)
+        check_param_counts(hf_model, mcore_model_parts)
+
     is_moe = is_qwen3_moe_config(hf_config)
+
+    # Map local (sharded) param names to global full model param names
     local_to_global_maps = create_local_to_global_map(mcore_model_parts)
+
+    # Create param name mapping: mcore < -- > hf
     mcore_to_hf_maps = create_mcore_hf_mapping(local_to_global_maps, is_moe=is_moe)
 
+    # Load per rank model shards
     mcore_model_parts = load_mcore_model_weights(
         model_path=model_path,
         mcore_model_parts=mcore_model_parts,
