@@ -193,7 +193,6 @@ def load_mcore_model_weights(
     mcore_model_parts: McoreModelT,
     mcore_to_hf_maps: list[dict[str, str]],
     device: str = "cuda",
-    perform_check: bool = True,
 ):
     model_cache_dir = get_model_cache(model_path)
 
@@ -202,16 +201,11 @@ def load_mcore_model_weights(
 
     loader.load_hf_weights(mcore_model_parts, mcore_to_hf_maps, device=device)
 
-    from ref.convert_utils import check_weights
-
-    if perform_check:
-        ref_model = check_weights(model_path, mcore_model_parts=mcore_model_parts)
-
-    return mcore_model_parts, ref_model if perform_check else mcore_model_parts
+    return mcore_model_parts
 
 
 def convert_hf_to_mcore(
-    qwen_config: Qwen3MCoreConfig, model_path: str, device: str = "cuda", check_weights: bool = True
+    qwen_config: Qwen3MCoreConfig, model_path: str, device: str = "cuda"
 ) -> tuple[TransformerConfig, McoreModelT]:
     mcore_config: TransformerConfig = qwen_config.to_mcore()
     hf_config: Qwen3ConfigT = qwen_config.hf_config
@@ -224,23 +218,14 @@ def convert_hf_to_mcore(
     local_to_global_maps = create_local_to_global_map(mcore_model_parts)
     mcore_to_hf_maps = create_mcore_hf_mapping(local_to_global_maps, is_moe=is_moe)
 
-    loaded_models = load_mcore_model_weights(
+    mcore_model_parts = load_mcore_model_weights(
         model_path=model_path,
         mcore_model_parts=mcore_model_parts,
         mcore_to_hf_maps=mcore_to_hf_maps,
         device=device,
-        perform_check=check_weights,
     )
-    
-    if check_weights:
-        mcore_model_parts, ref_models = loaded_models
-    else:
-        mcore_model_parts = loaded_models
 
-    outputs = (mcore_config, mcore_model_parts, ref_models) if check_weights else (mcore_config, mcore_model_parts) 
-    
-    return outputs
-
+    return mcore_config, mcore_model_parts
 
 def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, flops_count: int = 0):
     from megatron.training.checkpointing import save_checkpoint
@@ -273,41 +258,27 @@ def reinitialize_rope(mcore_model: McoreModelT, rotary_base: float, device: str 
             if rotary_emb.inv_freq.device.type == "meta":
                 rotary_emb.inv_freq = 1 / (rotary_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
 
-def generate_sequence(
-    model: McoreModelT,
-    hf_model_path: str,
-    ref_models = None,
+def check_logits(
+    mcore_model_parts: McoreModelT,
+    model_path: str,
     prompt: str = "Hello, how are you?  What is your name?",
-    max_new_tokens: int = 1,
     topk: int = 3,
     seed: int = 1234,
 ):
+    assert len(mcore_model_parts) == 1, f"Logits check not supported for pipeline parallel currently"
+    
+    gpt_model = mcore_model_parts[0].cuda()
+    
     args = get_args()
-    device = next(model[0].parameters()).device.type
+    device = next(gpt_model.parameters()).device.type
     model_parallel_cuda_manual_seed(seed)
-    from weight_conversion import _find_partition_dim
 
     if args.init_model_with_meta_device:    
-        reinitialize_rope(model, rotary_base=args.rotary_base, device=device)
-
-    if ref_models is not None:
-        ref_sd = ref_models[0].state_dict()
-        test_sd = model[0].state_dict()
-
-        for name, param in ref_sd.items():
-            if "_extra_state" in name:
-                continue
-            assert name in test_sd
-            actual = test_sd[name]
-            assert param.shape == actual.shape
-            assert param.dtype == actual.dtype
-            assert param.device == actual.device
-            assert param.equal(actual), f"{name} mismatch: {(param - actual).abs().max().item():.4f}"
+        reinitialize_rope([gpt_model], rotary_base=args.rotary_base, device=device)    
     
-    
-    tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(
-        hf_model_path, device_map=torch.cuda.current_device()
+        model_path, device_map=torch.cuda.current_device()
     )
 
     input_ids = tokenizer.encode(prompt, return_tensors="pt")
@@ -315,54 +286,37 @@ def generate_sequence(
     position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
     attention_mask = torch.ones_like(input_ids).to(input_ids.device)
 
-    cur_input_ids = input_ids
-    cur_position_ids = position_ids
-    cur_attention_mask = attention_mask
-    dist_print(f"{input_ids.shape=}", rank0_only=True)
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
     ep_size = mpu.get_expert_model_parallel_world_size()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
 
-    for _ in range(max_new_tokens):
-        # Move inputs to GPU
-        cur_input_ids = cur_input_ids.cuda()
-        cur_position_ids = cur_position_ids.cuda()
-        cur_attention_mask = cur_attention_mask.cuda()
 
-        # Forward inference with the model
-        with torch.no_grad():
-            model[0].cuda()
-            output = model[0](cur_input_ids, cur_position_ids, cur_attention_mask)
-            ref_output = hf_model.forward(cur_input_ids)
-            # if ref_models is not None:
-            #     ref_models[0].cuda()
-            #     ref_gpt_output = ref_models[0](cur_input_ids, cur_position_ids, cur_attention_mask)
-            #     ref_gpt_logits = ref_gpt_output[0].float()
-            #     _, ref_gpt_topk = ref_gpt_logits.topk(topk, dim=-1)
-            #     ref_diff = (ref_gpt_logits - output[0].float()).abs().max()
+    with torch.no_grad():
+        output = gpt_model(input_ids, position_ids, attention_mask)
+        ref_output = hf_model.forward(input_ids)
 
-        logits: torch.Tensor = output[0].float()
-        ref_logits: torch.Tensor = ref_output.logits[0].float()
+    logits: torch.Tensor = output[0].float()
+    ref_logits: torch.Tensor = ref_output.logits[0].float()
 
-        if tp_size > 1:
-            full_logits = torch.zeros(*ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype)
-            dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
-            logits = full_logits.T
-            
-        diff = (logits - ref_logits).abs().max()
-        dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
+    if tp_size > 1:
+        full_logits = torch.zeros(*ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype)
+        dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
+        logits = full_logits.T
         
-        _, topk_ids = logits.topk(topk, dim=-1)
-        _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
+    diff = (logits - ref_logits).abs().max()
+    dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
+    
+    _, topk_ids = logits.topk(topk, dim=-1)
+    _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
 
-        num_tokens = logits.shape[0]
-        for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
-            test = test.tolist()
-            ref = ref.tolist()
-            if set(test) != set(ref):
-                dist_print(f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}", rank0_only=True)
+    num_tokens = logits.shape[0]
+    for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
+        test = test.tolist()
+        ref = ref.tolist()
+        if set(test) != set(ref):
+            dist_print(f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}", rank0_only=True)
 
 
 def main(args: Namespace):
@@ -400,18 +354,12 @@ def main(args: Namespace):
     
     init_megatron(args)
 
-    check_weights = True
-    outputs = convert_hf_to_mcore(
-        qwen_config, model_path, check_weights=check_weights
+    mcore_config, mcore_model_parts = convert_hf_to_mcore(
+        qwen_config, model_path
     )
 
-    if check_weights:
-        mcore_config, mcore_model_parts, ref_models = outputs
-    else:
-        mcore_config, mcore_model_parts = outputs
-        ref_models = None
 
-    generate_sequence(model=mcore_model_parts, hf_model_path=model_path, ref_models=ref_models)
+    check_logits(mcore_model_parts, model_path=model_path)
     # save_local_checkpoint(mcore_model_parts)
 
 
