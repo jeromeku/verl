@@ -36,6 +36,7 @@ from qwen3_configuration import Qwen3ConfigT
 
 McoreModelT = list[GPTModel]
 
+
 def patch_mcore_args(
     args: Namespace,
     **kwargs,
@@ -45,7 +46,7 @@ def patch_mcore_args(
 
     # Not needed when loading checkpoints
     args.no_load_optim = True
-    args.no_load_rng = True    
+    args.no_load_rng = True
     args.no_save_optim = True
     args.no_save_rng = True
     args.mock_data = True
@@ -79,9 +80,7 @@ def get_transformer_spec(
     return transformer_layer_spec
 
 
-def get_model_provider_func(
-    config: TransformerConfig, parallel_output: bool = True
-):
+def get_model_provider_func(config: TransformerConfig, parallel_output: bool = True):
     args = get_args()
     use_transformer_engine = args.transformer_impl == "transformer_engine"
 
@@ -109,6 +108,7 @@ def get_model_provider_func(
         return model
 
     return model_provider_func
+
 
 @contextmanager
 def meta_device_context():
@@ -158,7 +158,7 @@ def meta_device_context():
 def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
     world_size = world_size or os.environ.get("WORLD_SIZE", None)
     rank = rank if rank is not None else os.environ.get("RANK", None)
-    
+
     assert world_size is not None and rank is not None, (
         "`world_size` and `rank` must be provided when using `fake` backend"
     )
@@ -168,15 +168,20 @@ def init_distributed(backend="nccl", world_size: int = None, rank: int = None):
 
     if backend == "fake":
         from torch.testing._internal.distributed.fake_pg import FakeStore
+
         store = FakeStore()
+        device = None
     else:
         store = None
 
-    torch.distributed.init_process_group(
-        backend=backend, store=store, rank=rank, world_size=world_size
-    )
     if backend == "nccl":
         torch.cuda.set_device(int(os.environ.get("LOCAL_RANK")))
+        device = torch.cuda._get_device(torch.cuda.current_device())
+        
+    torch.distributed.init_process_group(
+        backend=backend, store=store, rank=rank, world_size=world_size, device_id=device
+    )
+
 
 def init_mpu(tp=1, vpp=1, pp=1, cp=1, ep=1, etp=1, seed=0):
     mpu.initialize_model_parallel(
@@ -197,6 +202,7 @@ def get_model(
 ):
     args = get_args()
     init_on_meta = args.init_model_with_meta_device
+
     # Build model.
     def build_model():
         if (
@@ -341,19 +347,20 @@ def get_model(
     return model
 
 
-def generate_dataset(vocab_size: int, num_samples: int = 100, seqlen: int = 100, batch_size: int = 2):
-
+def generate_dataset(
+    vocab_size: int, num_samples: int = 100, seqlen: int = 100, batch_size: int = 2
+):
     input_ids = torch.randint(0, vocab_size, (num_samples, seqlen))
-    position_ids = torch.arange(seqlen).expand(num_samples, -1) 
+    position_ids = torch.arange(seqlen).expand(num_samples, -1)
     attention_mask = torch.ones_like(input_ids)
 
     dataset = TensorDataset(input_ids, position_ids, attention_mask)
     data_loader = DataLoader(dataset, batch_size=batch_size)
-    
+
     return data_loader
 
+
 def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
-    
     if dist.is_initialized():
         rank = dist.get_rank()
         if rank0_only and rank != 0:
@@ -361,8 +368,9 @@ def dist_print(*msg, delay: int = 1, rank0_only: bool = False):
         time.sleep(rank * delay)
     else:
         rank = 0
-        
+
     print(f"{rank=}:", *msg, flush=True)
+
 
 def dist_breakpoint(rank: int = 0):
     if dist.is_initialized() and rank == dist.get_rank():

@@ -262,11 +262,7 @@ def forward_step_func(data_iterator, model, device: str):
         return {"logits": logits}
 
     input_ids, position_ids, attention_mask = next(data_iterator)
-    output_tensor = model(
-        input_ids.to(device),
-        position_ids.to(device),
-        attention_mask.to(device)
-    )
+    output_tensor = model(input_ids.to(device), position_ids.to(device), attention_mask.to(device))
 
     return output_tensor, loss_func
 
@@ -331,6 +327,7 @@ def check_logits(
 
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from functools import partial
+
     forward_backward_func = get_forward_backward_func()
     dist_print(f"{type(forward_backward_func)=}", rank0_only=True)
 
@@ -346,17 +343,17 @@ def check_logits(
             forward_only=True,
             collect_non_loss_data=True,
         )
-    
+
         ref_output = hf_model.forward(input_ids)
-    
+
     if is_last_stage:
-        logits = outputs[0]['logits'][0]
-    
+        logits = outputs[0]["logits"][0]
+
     ref_logits: torch.Tensor = ref_output.logits[0].float()
 
     # output = gpt_model(input_ids, position_ids, attention_mask)
-#    logits: torch.Tensor = output[0].float()
- 
+    #    logits: torch.Tensor = output[0].float()
+
     if tp_size > 1 and is_last_stage:
         full_logits = torch.zeros(
             *ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype
@@ -366,7 +363,7 @@ def check_logits(
 
     if is_last_stage and tp_group_rank == 0:
         diff = (logits - ref_logits).abs().max()
-        dist_print(f"logits diff: {diff.item():.4f}")#, rank0_only=True)
+        dist_print(f"logits diff: {diff.item():.4f}")  # , rank0_only=True)
 
         _, topk_ids = logits.topk(topk, dim=-1)
         _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
@@ -378,17 +375,17 @@ def check_logits(
             if set(test) != set(ref):
                 dist_print(
                     f"Topk @ {topk} ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
-                    #rank0_only=True,
+                    # rank0_only=True,
                 )
-    
+
     dist.barrier()
 
-def main(args: Namespace):
 
+def main(args: Namespace):
     args = update_args_for_model_loading(args)
     model_path = args.model_id
     disable_progress_bar()
-    
+
     hf_config = AutoConfig.from_pretrained(model_path)
     sequence_parallel = args.sequence_parallel or args.tensor_model_parallel_size > 1
 
@@ -446,7 +443,7 @@ if __name__ == "__main__":
     )
     add_megatron_arguments(parser)
     args = parser.parse_args()
-    
+
     main(args)
 
     dist.barrier()
