@@ -309,12 +309,24 @@ def check_logits(
     # input_ids = torch.randint(0, args.vocab_size, (1, prompt_len), device=device)
     # position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
     # attention_mask = torch.ones_like(input_ids).to(input_ids.device)
+    rank = dist.get_rank()
 
+    mp_group = mpu.get_model_parallel_group()
+
+    is_pp = mpu.get_pipeline_model_parallel_world_size() > 1
+    pp_group = mpu.get_pipeline_model_parallel_group()
+    pp_group_rank = dist.get_group_rank(pp_group, rank)
+    is_last_stage = mpu.is_pipeline_last_stage()
     tp_size = mpu.get_tensor_model_parallel_world_size()
     tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
+    tp_group_rank = dist.get_group_rank(tp_group, rank)
     ep_size = mpu.get_expert_model_parallel_world_size()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
+
+    pp_group_ranks = dist.get_process_group_ranks(pp_group)
+    tp_group_ranks = dist.get_process_group_ranks(tp_group)
+    mp_group_ranks = dist.get_process_group_ranks(mp_group)
 
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from functools import partial
@@ -336,11 +348,12 @@ def check_logits(
     
         ref_output = hf_model.forward(input_ids)
     
-    logits = outputs[0]['logits'][0]
+    if is_last_stage:
+        logits = outputs[0]['logits'][0]
+    
     ref_logits: torch.Tensor = ref_output.logits[0].float()
 
-        # output = gpt_model(input_ids, position_ids, attention_mask)
-
+    # output = gpt_model(input_ids, position_ids, attention_mask)
 #    logits: torch.Tensor = output[0].float()
  
     if tp_size > 1:
@@ -350,21 +363,22 @@ def check_logits(
         dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
         logits = full_logits.T
 
-    diff = (logits - ref_logits).abs().max()
-    dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
+    if is_last_stage and tp_group_rank == 0:
+        diff = (logits - ref_logits).abs().max()
+        dist_print(f"logits diff: {diff.item():.4f}")#, rank0_only=True)
 
-    _, topk_ids = logits.topk(topk, dim=-1)
-    _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
+        _, topk_ids = logits.topk(topk, dim=-1)
+        _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
 
-    num_tokens = logits.shape[0]
-    for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
-        test = test.tolist()
-        ref = ref.tolist()
-        if set(test) != set(ref):
-            dist_print(
-                f"Topk @ {topk} ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
-                rank0_only=True,
-            )
+        num_tokens = logits.shape[0]
+        for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
+            test = test.tolist()
+            ref = ref.tolist()
+            if set(test) != set(ref):
+                dist_print(
+                    f"Topk @ {topk} ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
+                    #rank0_only=True,
+                )
 
 
 def main(args: Namespace):
