@@ -1,5 +1,5 @@
 from argparse import Namespace
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +32,17 @@ def is_qwen3_moe_config(config: Qwen3ConfigT):
 class ConfigBase:
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_args(cls, args: Namespace, **overrides) -> "ConfigBase":
+        kwargs = {f.name: getattr(args, f.name) for f in fields(cls) if hasattr(args, f.name)}
+        
+        # Manually set values, useful for setting sensible / preferred defaults
+        breakpoint()
+        for k, v in overrides.items():
+            if k in cls.__dataclass_fields__:
+                kwargs[k] = v
+        return cls(**kwargs)
 
 
 @dataclass
@@ -333,8 +344,6 @@ class Qwen3MCoreConfig:
 
         args.perform_initialization = False
         args.use_cpu_initialization = self.use_cpu_initialization
-        args.load = "dummy"
-        args.mock_data = True
 
         # Update architecture configs
         for k, v in self.arch_config.to_dict().items():

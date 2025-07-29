@@ -648,19 +648,23 @@ def load_checkpoint(queue, args):
 
     # config, hf_model, hf_state_dict, dtype = load_hf_model(args)
     from mcore_utils import patch_mcore_args
-    from qwen3_configuration import ParallelismConfig, Qwen3MCoreConfig, is_qwen3_moe_config
+    from qwen3_configuration import (
+        MoeOptConfig,
+        ParallelismConfig,
+        Qwen3MCoreConfig,
+        is_qwen3_moe_config,
+    )
     from transformers import AutoConfig
 
-    breakpoint()
     sys.argv = setup_megatron_args(args)
     margs = parse_args()
 
     for k,v in vars(args).items():
         if hasattr(margs, k):
             setattr(margs, k, v)
-    margs.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
 
-    breakpoint()
+#    margs.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
+    
     model_path = args.model_name
     hf_config = AutoConfig.from_pretrained(model_path)
 
@@ -671,19 +675,28 @@ def load_checkpoint(queue, args):
     if is_moe and args.tensor_model_parallel_size > 1:
         sequence_parallel = True
 
-    parallel_config = ParallelismConfig(
-        tensor_model_parallel_size=margs.tensor_model_parallel_size,
-        pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
-        virtual_pipeline_model_parallel_size=margs.virtual_pipeline_model_parallel_size,
-        context_parallel_size=margs.context_parallel_size,
-        expert_model_parallel_size=margs.expert_model_parallel_size,
-        expert_tensor_parallel_size=margs.expert_tensor_parallel_size,
-        sequence_parallel=sequence_parallel,
-    )
+    # parallel_config = ParallelismConfig(
+    #     tensor_model_parallel_size=margs.tensor_model_parallel_size,
+    #     pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
+    #     virtual_pipeline_model_parallel_size=margs.virtual_pipeline_model_parallel_size,
+    #     context_parallel_size=margs.context_parallel_size,
+    #     expert_model_parallel_size=margs.expert_model_parallel_size,
+    #     expert_tensor_parallel_size=margs.expert_tensor_parallel_size,
+    #     sequence_parallel=sequence_parallel,
+    # )
+    vpp_size = args.virtual_pipeline_model_parallel_size
+    parallel_config = ParallelismConfig.from_args(margs, sequence_parallel=sequence_parallel, virtual_pipeline_model_parallel_size=vpp_size)
+    
+    if is_moe:
+        moe_opt_config = MoeOptConfig.from_args(margs, moe_grouped_gemm=True)
+    else:
+        moe_opt_config = None
 
+    breakpoint()
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
         parallelism_config=parallel_config,
+        moe_opt_config=moe_opt_config,
         perform_initialization=margs.perform_initialization,
         use_cpu_initialization=margs.use_cpu_initialization,
         init_model_with_meta_device=margs.init_model_with_meta_device,
