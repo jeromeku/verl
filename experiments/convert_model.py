@@ -149,7 +149,9 @@ def create_local_to_global_map(mcore_model_parts: McoreModelT) -> list[dict[str,
     return local_to_global_maps
 
 
-def create_mcore_hf_mapping(local_to_global_maps: list[dict[str, str]], is_moe: bool) -> dict[str, str]:
+def create_mcore_hf_mapping(
+    local_to_global_maps: list[dict[str, str]], is_moe: bool
+) -> dict[str, str]:
     mcore_to_hf_maps = [map_mcore_hf_param_names(m, is_moe=is_moe) for m in local_to_global_maps]
 
     return mcore_to_hf_maps
@@ -213,6 +215,7 @@ def convert_hf_to_mcore(
 
     return mcore_config, mcore_model_parts
 
+
 def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, flops_count: int = 0):
     from megatron.training.checkpointing import save_checkpoint
     from megatron.core import mpu
@@ -236,13 +239,18 @@ def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, fl
         tensor_rank=tp_rank,
     )
 
+
 def reinitialize_rope(mcore_model: McoreModelT, rotary_base: float, device: str = "cuda"):
     for model in mcore_model:
         head_dim = model.config.kv_channels
         if hasattr(model, "rotary_pos_emb") and model.rotary_pos_emb is not None:
             rotary_emb = model.rotary_pos_emb
             if rotary_emb.inv_freq.device.type == "meta":
-                rotary_emb.inv_freq = 1 / (rotary_base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
+                rotary_emb.inv_freq = 1 / (
+                    rotary_base
+                    ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim)
+                )
+
 
 def check_logits(
     mcore_model_parts: McoreModelT,
@@ -251,17 +259,19 @@ def check_logits(
     topk: int = 3,
     seed: int = 1234,
 ):
-    assert len(mcore_model_parts) == 1, f"Logits check not supported for pipeline parallel currently"
-    
+    assert len(mcore_model_parts) == 1, (
+        f"Logits check not supported for pipeline parallel currently"
+    )
+
     gpt_model = mcore_model_parts[0].cuda()
-    
+
     args = get_args()
     device = next(gpt_model.parameters()).device.type
     model_parallel_cuda_manual_seed(seed)
 
-    if args.init_model_with_meta_device:    
-        reinitialize_rope([gpt_model], rotary_base=args.rotary_base, device=device)    
-    
+    if args.init_model_with_meta_device:
+        reinitialize_rope([gpt_model], rotary_base=args.rotary_base, device=device)
+
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_path, device_map=torch.cuda.current_device()
@@ -278,7 +288,6 @@ def check_logits(
     ep_size = mpu.get_expert_model_parallel_world_size()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
 
-
     with torch.no_grad():
         output = gpt_model(input_ids, position_ids, attention_mask)
         ref_output = hf_model.forward(input_ids)
@@ -287,13 +296,15 @@ def check_logits(
     ref_logits: torch.Tensor = ref_output.logits[0].float()
 
     if tp_size > 1:
-        full_logits = torch.zeros(*ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype)
+        full_logits = torch.zeros(
+            *ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype
+        )
         dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
         logits = full_logits.T
-        
+
     diff = (logits - ref_logits).abs().max()
     dist_print(f"logits diff: {diff.item():.4f}", rank0_only=True)
-    
+
     _, topk_ids = logits.topk(topk, dim=-1)
     _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
 
@@ -302,7 +313,10 @@ def check_logits(
         test = test.tolist()
         ref = ref.tolist()
         if set(test) != set(ref):
-            dist_print(f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}", rank0_only=True)
+            dist_print(
+                f"Topk ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
+                rank0_only=True,
+            )
 
 
 def main(args: Namespace):
@@ -337,13 +351,10 @@ def main(args: Namespace):
         pprint(qwen_config)
 
     args = qwen_config.update_mcore_args(args)
-    
+
     init_megatron(args)
 
-    mcore_config, mcore_model_parts = convert_hf_to_mcore(
-        qwen_config, model_path
-    )
-
+    mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
     check_logits(mcore_model_parts, model_path=model_path)
     # save_local_checkpoint(mcore_model_parts)
