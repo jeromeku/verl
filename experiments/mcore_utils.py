@@ -51,8 +51,8 @@ def patch_mcore_args(
     args.no_save_rng = True
     args.mock_data = True
 
-    args.rank = args.rank or torch.distributed.get_rank()
-    args.world_size = args.world_size or torch.distributed.get_world_size()
+    # args.rank = args.rank or torch.distributed.get_rank()
+    # args.world_size = args.world_size or torch.distributed.get_world_size()
 
     for k, v in kwargs.items():
         setattr(args, k, v)

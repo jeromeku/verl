@@ -331,8 +331,10 @@ class Qwen3MCoreConfig:
         args.rotary_base = self.rotary_base
         args.rope_scaling = True if self.rope_scaling is not None else False
 
-        args.perform_initialization = self.perform_initialization
+        args.perform_initialization = False
         args.use_cpu_initialization = self.use_cpu_initialization
+        args.load = "dummy"
+        args.mock_data = True
 
         # Update architecture configs
         for k, v in self.arch_config.to_dict().items():
