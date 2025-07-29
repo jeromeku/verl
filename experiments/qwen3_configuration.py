@@ -1,5 +1,5 @@
 from argparse import Namespace
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 
 import torch
 import torch.nn.functional as F
@@ -33,7 +33,16 @@ class ConfigBase:
     def to_dict(self) -> dict:
         return asdict(self)
 
+    @classmethod
+    def from_args(cls, args: Namespace, **overrides) -> "ConfigBase":
+        kwargs = {f.name: getattr(args, f.name) for f in fields(cls) if hasattr(args, f.name)}
 
+        # Manually set values, useful for setting sensible / preferred defaults
+        for k, v in overrides.items():
+            if k in cls.__dataclass_fields__:
+                kwargs[k] = v
+        return cls(**kwargs)
+    
 @dataclass
 class ParallelismConfig(ConfigBase):
     tensor_model_parallel_size: int = 1
