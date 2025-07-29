@@ -255,7 +255,7 @@ def reinitialize_rope(mcore_model: McoreModelT, rotary_base: float, device: str 
 def check_logits(
     mcore_model_parts: McoreModelT,
     model_path: str,
-    prompt: str = "Hello, how are you?  What is your name?",
+    prompt_len: int = 100,
     topk: int = 3,
     seed: int = 1234,
 ):
@@ -272,13 +272,11 @@ def check_logits(
     if args.init_model_with_meta_device:
         reinitialize_rope([gpt_model], rotary_base=args.rotary_base, device=device)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_path, device_map=torch.cuda.current_device()
     )
 
-    input_ids = tokenizer.encode(prompt, return_tensors="pt")
-    input_ids = input_ids.cuda()
+    input_ids = torch.randint(0, args.vocab_size, (1, prompt_len), device=device)
     position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
     attention_mask = torch.ones_like(input_ids).to(input_ids.device)
 
