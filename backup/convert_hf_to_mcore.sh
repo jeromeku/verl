@@ -10,11 +10,14 @@ TP=2
 PP=1
 CP=1
 EP=2
-ETP=1
+ETP=1 # Explicitly set ETP to 1, otherwise Megatron will default this to TP size
 VPP_SIZE=None
 
+# See Megatron parallel_state initialization logic for how they implement MoE parallel folding
+# Parallel folding ~ separate parallel groups for MoE / non-MoE layers: MoE layers uses EP / ETP while non-MoE uses TP / CP 
 WORLD_SIZE_NON_MOE=$((TP * CP * PP))
 WORLD_SIZE_MOE=$((EP * ETP * PP))
+
 if [[ "${WORLD_SIZE_NON_MOE}" -gt "${WORLD_SIZE_MOE}" ]]; then
     WORLD_SIZE=${WORLD_SIZE_NON_MOE}
 else
@@ -51,6 +54,8 @@ ARGS="--model-id ${MODEL_ID} \
 --expert-model-parallel-size ${EP} \
 --expert-tensor-parallel-size ${ETP} \
 --check-logits \
+--logits-save-path logits_check \
+--topk 5 \
 --save ${SAVE_DIR} \
 --save-interval 1 \
 --ckpt-format ${CKPT_FORMAT}"

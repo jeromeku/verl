@@ -505,7 +505,7 @@ def check_logits(
         df["mcore_topk_scores"] = df["mcore_topk_scores"].apply(lambda scores: [f"{x:.4f}" for x in scores]) 
         print(df)
 
-        print(f"Logits comparison save to {save_path}")
+        print(f"Logits comparison saved to {save_path}")
     dist.barrier()
 
 
@@ -542,7 +542,7 @@ def main(args: Namespace):
     mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
     check_logits(mcore_model_parts, model_path=model_path, topk=args.topk)
-    # save_local_checkpoint(mcore_model_parts)
+    save_local_checkpoint(mcore_model_parts)
 
 
 if __name__ == "__main__":
