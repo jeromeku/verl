@@ -4,12 +4,12 @@ set -euo pipefail
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
 QWEN3_MOE="assets/qwen3_moe_4layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/Qwen3-30B-A3B"
 
-MODEL_ID="${QWEN3_DENSE}"
+MODEL_ID="${QWEN3_MOE}"
 
-TP=1
+TP=2
 PP=1
 CP=1
-EP=1
+EP=2
 ETP=1 # Explicitly set ETP to 1, otherwise Megatron will default this to TP size
 VPP_SIZE=None
 
@@ -58,7 +58,8 @@ ARGS="--model-id ${MODEL_ID} \
 --topk 5 \
 --save ${SAVE_DIR} \
 --save-interval 1 \
---ckpt-format ${CKPT_FORMAT}"
+--ckpt-format ${CKPT_FORMAT} \
+--save-checkpoint"
 
 if [[ ${INIT_METHOD} == ${INIT_CPU} || ${INIT_METHOD} == ${INIT_META} ]]; then
     ARGS+=" ${INIT_METHOD}"
