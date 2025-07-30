@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 from pprint import pprint
 from typing import Iterator
+from itertools import tee
+import os
 import megatron.core as mc
 
 # Need include megatron root to resolve modules outside of megatron.core
@@ -334,14 +336,14 @@ class ModelCheckResult:
 
 
 def build_comparison_df(
-    model1_results: list[ModelCheckResult],
-    model2_results: list[ModelCheckResult],
+    hf_results: list[ModelCheckResult],
+    mcore_results: list[ModelCheckResult],
 ) -> pd.DataFrame:
-    if len(model1_results) != len(model2_results):
+    if len(hf_results) != len(mcore_results):
         raise ValueError("Result lists must be the same length (one per prompt).")
 
     rows = []
-    for prompt_idx, (res1, res2) in enumerate(zip(model1_results, model2_results)):
+    for prompt_idx, (res1, res2) in enumerate(zip(hf_results, mcore_results)):
         assert res1.input_ids == res2.input_ids
 
         for tok_idx, input_id in enumerate(res1.input_ids):
@@ -349,11 +351,12 @@ def build_comparison_df(
                 {
                     "prompt_idx": prompt_idx,
                     "token_idx": tok_idx,
-                    "input_id": input_id,
-                    "model1_topk_ids": res1.topk_ids[tok_idx],
-                    "model1_topk_scores": res1.topk_scores[tok_idx],
-                    "model2_topk_ids": res2.topk_ids[tok_idx],
-                    "model2_topk_scores": res2.topk_scores[tok_idx],
+                    "input_ids": res1.input_ids,
+                    "token_id": input_id,
+                    "hf_topk_ids": res1.topk_ids[tok_idx],
+                    "mcore_topk_ids": res2.topk_ids[tok_idx],
+                    "hf_topk_scores": res1.topk_scores[tok_idx],
+                    "mcore_topk_scores": res2.topk_scores[tok_idx],
                 }
             )
 
@@ -449,87 +452,48 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
 def check_logits(
     mcore_model_parts: McoreModelT,
     model_path: str,
-    num_samples: int = 100,
-    prompt_len: int = 100,
     topk: int = 3,
     seed: int = 1234,
 ):
-    from mcore_utils import generate_dataset
-
-    # assert len(mcore_model_parts) == 1, (
-    #     f"Logits check not supported for pipeline parallel currently"
-    # )
-
     args = get_args()
     gpt_model = mcore_model_parts[0].cuda()
     device = next(gpt_model.parameters()).device.type
+    torch.manual_seed(seed)
     model_parallel_cuda_manual_seed(seed)
 
     if args.init_model_with_meta_device:
         reinitialize_rope(mcore_model_parts, rotary_base=args.rotary_base, device=device)
 
-    # hf_model = AutoModelForCausalLM.from_pretrained(
-    #     model_path, device_map=torch.cuda.current_device()
-    # )
-
-    torch.manual_seed(seed)
-
-    # dataset = generate_dataset(
-    #     vocab_size=args.vocab_size, num_samples=num_samples, seqlen=prompt_len, batch_size=1
-    # )
-    # input_ids, position_ids, attention_mask = next(iter(dataset))
-    # input_ids, position_ids, attention_mask = (
-    #     input_ids.to(device),
-    #     position_ids.to(device),
-    #     attention_mask.to(device),
-    # )
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     prompts = get_test_prompts()
     dataset = PromptDataset(prompts, tokenizer, device="cuda")
     data_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
-    # input_ids = torch.randint(0, args.vocab_size, (1, prompt_len), device=device)
-    # position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-    # attention_mask = torch.ones_like(input_ids).to(input_ids.device)
     rank = dist.get_rank()
-
-    mp_group = mpu.get_model_parallel_group()
-
-    is_pp = mpu.get_pipeline_model_parallel_world_size() > 1
-    pp_group = mpu.get_pipeline_model_parallel_group()
-    pp_group_rank = dist.get_group_rank(pp_group, rank)
     is_last_stage = mpu.is_pipeline_last_stage()
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_group_rank = dist.get_group_rank(tp_group, rank)
-    ep_size = mpu.get_expert_model_parallel_world_size()
     ep_group = mpu.get_expert_model_parallel_group()
     etp_group = mpu.get_expert_tensor_parallel_group()
-    etp_size = mpu.get_expert_tensor_parallel_world_size()
     ep_group_rank = dist.get_group_rank(ep_group, rank)
     etp_group_rank = dist.get_group_rank(etp_group, rank)
     
     should_print = tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
 
-    from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
-    from functools import partial
-    from itertools import tee
-    forward_backward_func = get_forward_backward_func()
-    # data_iter = iter(dataset)
     data_iter = iter(data_loader)
     hf_data, mcore_data = tee(data_iter, 2)
     
-    hf_results = run_hf(model_path, hf_data, topk)
-    if rank == 0:
-        print(f"{len(hf_results)}")
-    
+    hf_results = run_hf(model_path, hf_data, topk)    
     mcore_results = run_mc(mcore_model_parts, mcore_data, topk)
     
     if should_print: #ep_group_rank == 0 and tp_group_rank == 0 and is_last_stage:
         dist_print(f"{len(mcore_results)}")
         df = build_comparison_df(hf_results, mcore_results)
         print(df)
+        file_stem = Path(model_path.split("/")[-1]).with_suffix(".csv")
+        save_path = (args.logits_save_path / file_stem).resolve().as_posix()
+        df.to_csv(save_path)
+        print(f"Logits comparison save to {save_path}")
     dist.barrier()
 
 
@@ -590,8 +554,14 @@ if __name__ == "__main__":
         dest="finetune",
         help="Enable finetune by default in order to disable initialization of weights and structs needed only for pretraining",
     )
+    parser.add_argument("--check-logits", action="store_true")
+    parser.add_argument("--logits-save-path", type=Path, default="logits_results", help="If checking logits, where to save results")
+
     add_megatron_arguments(parser)
     args = parser.parse_args()
+
+    if args.check_logits:
+        os.makedirs(args.logits_save_path, exist_ok=True)
 
     main(args)
 

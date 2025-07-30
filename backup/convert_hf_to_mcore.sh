@@ -9,7 +9,7 @@ MODEL_ID="${QWEN3_MOE}"
 TP=1
 PP=1
 CP=1
-EP=2
+EP=1
 ETP=1
 VPP_SIZE=None
 
@@ -50,6 +50,7 @@ ARGS="--model-id ${MODEL_ID} \
 --context-parallel-size ${CP} \
 --expert-model-parallel-size ${EP} \
 --expert-tensor-parallel-size ${ETP} \
+--check-logits \
 --save ${SAVE_DIR} \
 --save-interval 1 \
 --ckpt-format ${CKPT_FORMAT}"
