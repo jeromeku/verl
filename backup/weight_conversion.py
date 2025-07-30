@@ -211,7 +211,6 @@ def map_mcore_hf_param_names(
                 break
 
         if len(mapped_names) == 0:
-            breakpoint()
             raise ValueError(f"MLP parameter name {name} not recognized")
 
         return mapped_names

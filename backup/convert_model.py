@@ -550,7 +550,7 @@ def main(args: Namespace):
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
         parallelism_config=parallel_config,
-        moe_opt_config=moe_opt_config,
+        # moe_opt_config=moe_opt_config,
         perform_initialization=args.perform_initialization,
         use_cpu_initialization=args.use_cpu_initialization,
         init_model_with_meta_device=args.init_model_with_meta_device,

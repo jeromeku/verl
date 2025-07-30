@@ -4,9 +4,9 @@ set -euo pipefail
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
 QWEN3_MOE="assets/qwen3_moe_4layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/Qwen3-30B-A3B"
 
-MODEL_ID="${QWEN3_DENSE}"
+MODEL_ID="${QWEN3_MOE}"
 
-TP=2
+TP=1
 PP=1
 CP=1
 EP=1
@@ -21,7 +21,7 @@ else
     WORLD_SIZE=${WORLD_SIZE_MOE}
 fi
 
-BACKEND="nccl"
+BACKEND="fake"
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
 RANK=0
