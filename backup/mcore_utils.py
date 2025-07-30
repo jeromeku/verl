@@ -347,11 +347,11 @@ def get_model(
     return model
 
 
-def generate_random_dataset(
-    vocab_size: int, num_samples: int = 100, seqlen: int = 100, batch_size: int = 2, device: str = "cuda"
+def generate_dataset(
+    vocab_size: int, num_samples: int = 100, seqlen: int = 100, batch_size: int = 2
 ):
-    input_ids = torch.randint(0, vocab_size, (num_samples, seqlen), device=device)
-    position_ids = torch.arange(seqlen, device=device).expand(num_samples, -1)
+    input_ids = torch.randint(0, vocab_size, (num_samples, seqlen))
+    position_ids = torch.arange(seqlen).expand(num_samples, -1)
     attention_mask = torch.ones_like(input_ids)
 
     dataset = TensorDataset(input_ids, position_ids, attention_mask)
