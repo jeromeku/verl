@@ -347,7 +347,7 @@ def get_model(
     return model
 
 
-def generate_dataset(
+def generate_random_dataset(
     vocab_size: int, num_samples: int = 100, seqlen: int = 100, batch_size: int = 2
 ):
     input_ids = torch.randint(0, vocab_size, (num_samples, seqlen))

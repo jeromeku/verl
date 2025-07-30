@@ -2,6 +2,8 @@
 import sys
 from pathlib import Path
 from pprint import pprint
+from typing import Iterator
+import gc
 import megatron.core as mc
 
 # Need include megatron root to resolve modules outside of megatron.core
@@ -40,13 +42,13 @@ from qwen3_configuration import (
     QWEN3_MOE_MODELS,
     Qwen3MCoreConfig,
     Qwen3ConfigT,
+    MoeOptConfig,
     ParallelismConfig,
     Qwen3ModelT,
     is_qwen3_moe_config,
     QWEN3_MODELS,
 )
 from debugging import get_model_param_devices, get_total_params, get_module_param_count
-from ref.convert_utils import _weight_name_mapping_mcore_local_to_global
 from weight_conversion import remap_param_names_for_ep_pp, map_mcore_hf_param_names, ShardLoader
 
 
@@ -267,20 +269,60 @@ def forward_step_func(data_iterator, model, device: str):
     return output_tensor, loss_func
 
 
+def get_test_prompts() -> list[str]:
+    return [
+        "The capital of France is",
+        "Machine learning is",
+        "Python is a programming language that",
+        "In the year 2024,",
+        "Artificial intelligence will",
+        "The weather today is",
+        "Scientists have discovered",
+        "The most important thing in life is",
+    ]
+
+
+# generate one sample at a time to circumvent any issues with masking
+def generate_prompts(tokenizer, prompts: list[str], device: str = "cuda"):
+    for prompt in prompts:
+        encoded = tokenizer(prompt, return_tensors="pt").to(device)
+        input_ids = encoded.input_ids
+        attention_mask = encoded.attention_mask
+        position_ids = torch.arange(
+            input_ids.shape[1], dtype=torch.long, device=input_ids.device
+        ).unsqueeze(0)
+
+        yield input_ids, position_ids, attention_mask
+
+
+import numpy as np
+from dataclasses import dataclass
+
+
+@dataclass
+class ModelCheckResult:
+    logits: np.array
+    input_ids: list[int]
+    topk_ids: list[int]
+    topk_scores: list[float]
+    prompt: str = None
+
+
 def check_logits(
     mcore_model_parts: McoreModelT,
     model_path: str,
-    num_samples: int = 100,
+    data_iterator: Iterator = None,
+    num_samples: int = 1,
     prompt_len: int = 100,
     topk: int = 3,
     seed: int = 1234,
 ):
-    from mcore_utils import generate_dataset
+    from mcore_utils import generate_random_dataset
 
     # assert len(mcore_model_parts) == 1, (
     #     f"Logits check not supported for pipeline parallel currently"
     # )
-
+    breakpoint()
     args = get_args()
     gpt_model = mcore_model_parts[0].cuda()
     device = next(gpt_model.parameters()).device.type
@@ -289,20 +331,19 @@ def check_logits(
     if args.init_model_with_meta_device:
         reinitialize_rope(mcore_model_parts, rotary_base=args.rotary_base, device=device)
 
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=torch.cuda.current_device()
-    )
-
     torch.manual_seed(seed)
-    dataset = generate_dataset(
-        vocab_size=args.vocab_size, num_samples=num_samples, seqlen=prompt_len, batch_size=1
-    )
-    input_ids, position_ids, attention_mask = next(iter(dataset))
-    input_ids, position_ids, attention_mask = (
-        input_ids.to(device),
-        position_ids.to(device),
-        attention_mask.to(device),
-    )
+    if data_iterator is None:
+        dataset = generate_random_dataset(
+            vocab_size=args.vocab_size, num_samples=num_samples, seqlen=prompt_len, batch_size=1
+        )
+        data_iterator = iter(dataset)
+        # input_ids, position_ids, attention_mask = next(iter(dataset))
+        # input_ids, position_ids, attention_mask = (
+        #     input_ids.to(device),
+        #     position_ids.to(device),
+        #     attention_mask.to(device),
+        # )
+
     # input_ids = torch.randint(0, args.vocab_size, (1, prompt_len), device=device)
     # position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
     # attention_mask = torch.ones_like(input_ids).to(input_ids.device)
@@ -327,48 +368,93 @@ def check_logits(
 
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from functools import partial
+    from itertools import tee
+
+    data_iter_hf, data_iter_mc = tee(data_iterator, 2)
 
     forward_backward_func = get_forward_backward_func()
     dist_print(f"{type(forward_backward_func)=}", rank0_only=True)
 
-    with torch.no_grad():
-        outputs = forward_backward_func(
-            forward_step_func=partial(forward_step_func, device=device),
-            data_iterator=iter(dataset),
-            model=mcore_model_parts,
-            num_microbatches=1,
-            seq_length=prompt_len,
-            micro_batch_size=1,
-            decoder_seq_length=prompt_len,
-            forward_only=True,
-            collect_non_loss_data=True,
+    @torch.no_grad
+    def run_hf():
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model_path, device_map=torch.cuda.current_device()
         )
 
-        ref_output = hf_model.forward(input_ids)
+        results = []
+        for input_ids, _, _ in data_iter_hf:
+            output = hf_model.forward(input_ids)
+            logits = output.logits[0].float()
+            topk_scores, topk_ids = logits.topk(topk, dim=-1)
+            results.append(
+                ModelCheckResult(
+                    logits=logits.cpu().numpy(),
+                    topk_ids=topk_ids.tolist(),
+                    topk_scores=topk_scores.tolist(),
+                    input_ids=input_ids.tolist(),
+                )
+            )
 
-    if is_last_stage:
-        logits = outputs[0]["logits"][0]
+        del hf_model
+        torch.cuda.empty_cache()
+        gc.collect()
 
-    ref_logits: torch.Tensor = ref_output.logits[0].float()
+        return results
 
-    # output = gpt_model(input_ids, position_ids, attention_mask)
-    #    logits: torch.Tensor = output[0].float()
+    @torch.no_grad
+    def run_mc():
+        results = []
 
-    if tp_size > 1 and is_last_stage:
-        full_logits = torch.zeros(
-            *ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype
-        )
-        dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
-        logits = full_logits.T
+        for sample in data_iter_mc:
+            input_ids = sample[0]
+            out = forward_backward_func(
+                forward_step_func=partial(forward_step_func, device=device),
+                data_iterator=iter([sample]),
+                model=mcore_model_parts,
+                num_microbatches=1,
+                seq_length=len(sample[0]),
+                micro_batch_size=1,
+                decoder_seq_length=None,  # ignored if variable_seq_lengths
+                forward_only=True,
+                collect_non_loss_data=True,
+            )
+
+            # if is_last_stage:
+            #     logits = outputs[0]["logits"][0]
+
+            logits = out[0]["logits"][0]
+            topk_scores, topk_ids = logits.topk(topk, dim=-1)
+
+            if tp_size > 1 and is_last_stage:
+                full_logits = torch.zeros(
+                    *ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype
+                )
+                dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
+                logits = full_logits.T
+                topk_scores, topk_ids = logits.topk(topk, dim=-1)
+            results.append(
+                ModelCheckResult(
+                    logits=logits.cpu().numpy(),
+                    topk_ids=topk_ids.tolist(),
+                    topk_scores=topk_scores.tolist(),
+                    input_ids=input_ids.tolist(),
+                )
+            )
+
+        return results
+
+    ref_results: torch.Tensor = run_hf()
+    test_results: torch.Tensor = run_mc()
+    breakpoint()
 
     if is_last_stage and tp_group_rank == 0:
-        diff = (logits - ref_logits).abs().max()
+        diff = (test_logits - ref_logits).abs().max()
         dist_print(f"logits diff: {diff.item():.4f}")  # , rank0_only=True)
 
-        _, topk_ids = logits.topk(topk, dim=-1)
+        _, topk_ids = test_logits.topk(topk, dim=-1)
         _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
 
-        num_tokens = logits.shape[0]
+        num_tokens = test_logits.shape[0]
         for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
             test = test.tolist()
             ref = ref.tolist()
@@ -389,22 +475,23 @@ def main(args: Namespace):
     hf_config = AutoConfig.from_pretrained(model_path)
     sequence_parallel = args.sequence_parallel or args.tensor_model_parallel_size > 1
 
-    if is_qwen3_moe_config(hf_config) and args.tensor_model_parallel_size > 1:
+    is_moe = is_qwen3_moe_config(hf_config)
+
+    if is_moe and args.tensor_model_parallel_size > 1:
         sequence_parallel = True
 
-    parallel_config = ParallelismConfig(
-        tensor_model_parallel_size=args.tensor_model_parallel_size,
-        pipeline_model_parallel_size=args.pipeline_model_parallel_size,
-        virtual_pipeline_model_parallel_size=args.virtual_pipeline_model_parallel_size,
-        context_parallel_size=args.context_parallel_size,
-        expert_model_parallel_size=args.expert_model_parallel_size,
-        expert_tensor_parallel_size=args.expert_tensor_parallel_size,
-        sequence_parallel=sequence_parallel,
+    # set variable_seq_lengths to run forward on variable len prompts
+    parallel_config = ParallelismConfig.from_args(
+        args,
+        sequence_parallel=sequence_parallel,  # , variable_seq_lengths=True
     )
+
+    moe_opt_config = MoeOptConfig.from_args(args) if is_moe else None
 
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
         parallelism_config=parallel_config,
+        moe_opt_config=moe_opt_config,
         perform_initialization=args.perform_initialization,
         use_cpu_initialization=args.use_cpu_initialization,
         init_model_with_meta_device=args.init_model_with_meta_device,
@@ -419,7 +506,13 @@ def main(args: Namespace):
 
     mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
-    check_logits(mcore_model_parts, model_path=model_path)
+    prompts = get_test_prompts()
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    data_iterator = generate_prompts(
+        tokenizer, prompts, device=next(mcore_model_parts[0].parameters()).device.type
+    )
+
+    check_logits(mcore_model_parts, model_path=model_path, data_iterator=data_iterator)
     # save_local_checkpoint(mcore_model_parts)
 
 
