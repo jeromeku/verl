@@ -442,7 +442,7 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
             logits = full_logits.T
         
         topk_scores, topk_ids = logits.topk(topk, dim=-1)
-        results.append(ModelCheckResult(logits=logits.cpu().numpy(), input_ids=input_ids.tolist(), topk_scores=topk_scores.tolist(), topk_ids=topk_ids.tolist()))    
+        results.append(ModelCheckResult(logits=logits.cpu().numpy(), input_ids=input_ids[0].tolist(), topk_scores=topk_scores.tolist(), topk_ids=topk_ids.tolist()))    
 
     return results
 
@@ -525,59 +525,8 @@ def check_logits(
     mcore_results = run_mc(mcore_model_parts, mcore_data, topk)
     if tp_group_rank == 0 and is_last_stage:
         dist_print(f"{len(mcore_results)}")
-    
-    # with torch.no_grad():
-    #     for d in data_iter:
-    #         input_ids = d["input_ids"]
-    #         prompt_len = len(input_ids[0])
-    #         if rank == 0:
-    #             print(f"Processing prompt {input_ids=}, {prompt_len=}")
-
-    #         outputs = forward_backward_func(
-    #             forward_step_func=partial(forward_step_func, device=device),
-    #             data_iterator=iter([d]),  # siter(dataset),
-    #             model=mcore_model_parts,
-    #             num_microbatches=1,
-    #             seq_length=prompt_len,
-    #             micro_batch_size=1,
-    #             decoder_seq_length=prompt_len,
-    #             forward_only=True,
-    #             collect_non_loss_data=True,
-    #         )
-
-    #     # ref_output = hf_model.forward(input_ids)
-
-    # if is_last_stage:
-    #     logits = outputs[0]["logits"][0]
-
-    # # ref_logits: torch.Tensor = ref_output.logits[0].float()
-
-    # # output = gpt_model(input_ids, position_ids, attention_mask)
-    # #    logits: torch.Tensor = output[0].float()
-
-    # if tp_size > 1 and is_last_stage:
-    #     output_shape = (logits.shape[1] * tp_size, logits.shape[0])
-    #     full_logits = torch.zeros(*output_shape, device=logits.device, dtype=logits.dtype)
-    #     dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
-    #     logits = full_logits.T
-
-    # if is_last_stage and tp_group_rank == 0:
-    #     diff = (logits - ref_logits).abs().max()
-    #     dist_print(f"logits diff: {diff.item():.4f}")  # , rank0_only=True)
-
-    #     _, topk_ids = logits.topk(topk, dim=-1)
-    #     _, ref_topk_ids = ref_logits.topk(topk, dim=-1)
-
-    #     num_tokens = logits.shape[0]
-    #     for i, (test, ref) in enumerate(zip(topk_ids, ref_topk_ids)):
-    #         test = test.tolist()
-    #         ref = ref.tolist()
-    #         if set(test) != set(ref):
-    #             dist_print(
-    #                 f"Topk @ {topk} ids mismatch at token position {i + 1} / {num_tokens}: {test} != {ref}",
-    #                 # rank0_only=True,
-    #             )
-
+        df = build_comparison_df(hf_results, mcore_results)
+        print(df)
     dist.barrier()
 
 
