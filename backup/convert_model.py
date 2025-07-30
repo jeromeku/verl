@@ -350,15 +350,16 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
             dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
             logits = full_logits.T
 
-        topk_scores, topk_ids = logits.topk(topk, dim=-1)
-        results.append(
-            ModelCheckResult(
-                logits=logits.cpu().numpy(),
-                input_ids=input_ids[0].tolist(),
-                topk_scores=topk_scores.tolist(),
-                topk_ids=topk_ids.tolist(),
+        if is_last_stage:
+            topk_scores, topk_ids = logits.topk(topk, dim=-1)
+            results.append(
+                ModelCheckResult(
+                    logits=logits.cpu().numpy(),
+                    input_ids=input_ids[0].tolist(),
+                    topk_scores=topk_scores.tolist(),
+                    topk_ids=topk_ids.tolist(),
+                )
             )
-        )
 
     return results
 
