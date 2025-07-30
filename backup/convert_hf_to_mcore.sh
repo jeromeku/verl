@@ -9,7 +9,7 @@ MODEL_ID="${QWEN3_MOE}"
 TP=1
 PP=1
 CP=1
-EP=1
+EP=2
 ETP=1
 VPP_SIZE=None
 
@@ -21,7 +21,7 @@ else
     WORLD_SIZE=${WORLD_SIZE_MOE}
 fi
 
-BACKEND="fake"
+BACKEND="nccl"
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
 RANK=0

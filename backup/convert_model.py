@@ -504,11 +504,13 @@ def check_logits(
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_group_rank = dist.get_group_rank(tp_group, rank)
     ep_size = mpu.get_expert_model_parallel_world_size()
+    ep_group = mpu.get_expert_model_parallel_group()
+    etp_group = mpu.get_expert_tensor_parallel_group()
     etp_size = mpu.get_expert_tensor_parallel_world_size()
-
-    pp_group_ranks = dist.get_process_group_ranks(pp_group)
-    tp_group_ranks = dist.get_process_group_ranks(tp_group)
-    mp_group_ranks = dist.get_process_group_ranks(mp_group)
+    ep_group_rank = dist.get_group_rank(ep_group, rank)
+    etp_group_rank = dist.get_group_rank(etp_group, rank)
+    
+    should_print = tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
 
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from functools import partial
@@ -523,7 +525,8 @@ def check_logits(
         print(f"{len(hf_results)}")
     
     mcore_results = run_mc(mcore_model_parts, mcore_data, topk)
-    if tp_group_rank == 0 and is_last_stage:
+    
+    if should_print: #ep_group_rank == 0 and tp_group_rank == 0 and is_last_stage:
         dist_print(f"{len(mcore_results)}")
         df = build_comparison_df(hf_results, mcore_results)
         print(df)
