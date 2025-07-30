@@ -25,6 +25,7 @@ from transformers.models.qwen3 import Qwen3ForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeForCausalLM
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers.utils.logging import disable_progress_bar
+import pandas as pd
 
 import torch.distributed as dist
 import torch
@@ -307,6 +308,34 @@ class ModelCheckResult:
     topk_scores: list[float]
     prompt: str = None
 
+def build_comparison_df(
+    model1_results: list[ModelCheckResult],
+    model2_results: list[ModelCheckResult],
+) -> pd.DataFrame:
+    if len(model1_results) != len(model2_results):
+        raise ValueError("Result lists must be the same length (one per prompt).")
+
+    rows = []
+    for prompt_idx, (res1, res2) in enumerate(zip(model1_results, model2_results)):
+        assert res1.input_ids == res2.input_ids
+
+        for tok_idx, input_id in enumerate(res1.input_ids):
+            rows.append(
+                {
+                    "prompt_idx": prompt_idx,
+                    "token_idx": tok_idx,
+                    "input_id": input_id,
+                    "model1_topk_ids": res1.topk_ids[tok_idx],
+                    "model1_topk_scores": res1.topk_scores[tok_idx],
+                    "model2_topk_ids": res2.topk_ids[tok_idx],
+                    "model2_topk_scores": res2.topk_scores[tok_idx],
+                }
+            )
+
+    df = pd.DataFrame(rows).set_index(["prompt_idx", "token_idx"])
+    return df
+
+
 
 def check_logits(
     mcore_model_parts: McoreModelT,
@@ -391,7 +420,7 @@ def check_logits(
                     logits=logits.cpu().numpy(),
                     topk_ids=topk_ids.tolist(),
                     topk_scores=topk_scores.tolist(),
-                    input_ids=input_ids.tolist(),
+                    input_ids=input_ids[0].tolist(),
                 )
             )
 
@@ -422,29 +451,40 @@ def check_logits(
             # if is_last_stage:
             #     logits = outputs[0]["logits"][0]
 
-            logits = out[0]["logits"][0]
+            
+            
+            logits = out[0]["logits"][0].float()
             topk_scores, topk_ids = logits.topk(topk, dim=-1)
-
+            
             if tp_size > 1 and is_last_stage:
+                # transpose since gather only support gather_dim = 0
+                output_shape = (logits.shape[1] * tp_size, logits.shape[0])
                 full_logits = torch.zeros(
-                    *ref_logits.T.shape, device=ref_logits.device, dtype=ref_logits.dtype
+                    *output_shape, device=logits.device, dtype=logits.dtype
                 )
                 dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
                 logits = full_logits.T
                 topk_scores, topk_ids = logits.topk(topk, dim=-1)
+            
+            
             results.append(
                 ModelCheckResult(
                     logits=logits.cpu().numpy(),
                     topk_ids=topk_ids.tolist(),
                     topk_scores=topk_scores.tolist(),
-                    input_ids=input_ids.tolist(),
+                    input_ids=input_ids[0].tolist(),
                 )
             )
 
         return results
 
+    
     ref_results: torch.Tensor = run_hf()
-    test_results: torch.Tensor = run_mc()
+    
+    if is_last_stage and tp_group_rank == 0:
+        test_results: torch.Tensor = run_mc()
+        df = build_comparison_df(ref_results, test_results)
+
     breakpoint()
 
     if is_last_stage and tp_group_rank == 0:
