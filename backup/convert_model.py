@@ -453,7 +453,7 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
         )
 
         if is_last_stage:
-            logits = outputs[0]["logits"][0]
+            logits = outputs[0]["logits"][0].float()
 
         # When using pp, only last pp stage produces logits
         # When using tp, outputs are parallel, split across vocab dim (1)
@@ -494,7 +494,7 @@ def process_results(
 
     def save_df(df: pd.DataFrame, label: str):
         file_stem = base_name + "__" + label
-        save_path = (save_dir / file_stem).with_suffix(".csv").resolve().as_posix()
+        save_path = (save_dir / file_stem).resolve().as_posix() + ".csv"
         df.to_csv(save_path)
         print(f"{label} df saved to {save_path}")
 
