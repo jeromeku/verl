@@ -325,15 +325,19 @@ class ModelCheckResult:
     topk_scores: list[float]
     prompt: str = None
 
-def calculate_logits_stats(hf_logits: np.array, mcore_logits: np.array):
-    logit_diff = torch.abs(hf_logits - mcore_logits)
-    max_diff = logit_diff.max().item()
-    avg_diff = logit_diff.mean().item()
-    relative_diff = (logit_diff / (torch.abs(hf_logits) + 1e-8)).mean().item() * 100
 
-    return {"max_diff": max_diff, "avg_diff": avg_diff, "rel_diff": relative_diff }
+def calculate_logits_stats(hf_logits: np.array, mcore_logits: np.array, eps: float = 1e-8):
+    absdiff = np.abs(hf_logits - mcore_logits)
+    max_diff = absdiff.max()
+    avg_diff = absdiff.mean()
+    relative_diff = (absdiff / (np.abs(hf_logits) + eps)).mean() * 100
 
-def calculate_topk_stats(hf_topk_ids: list[int], mcore_topk_ids: list[int], topk_ranks: list[int] = [1, 3, 5]):
+    return {"max_diff": max_diff, "avg_diff": avg_diff, "rel_diff": relative_diff}
+
+
+def calculate_topk_stats(
+    hf_topk_ids: list[int], mcore_topk_ids: list[int], topk_ranks: list[int] = [1, 3, 5]
+):
     matches = {}
     topk_ranks = [k for k in topk_ranks if k <= len(hf_topk_ids)]
     for k in topk_ranks:
@@ -343,24 +347,34 @@ def calculate_topk_stats(hf_topk_ids: list[int], mcore_topk_ids: list[int], topk
 
     return matches
 
-def build_comparison_df(
+
+def postprocess_logits(
     hf_results: list[ModelCheckResult],
     mcore_results: list[ModelCheckResult],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     if len(hf_results) != len(mcore_results):
         raise ValueError("Result lists must be the same length (one per prompt).")
 
-    rows = []
+    per_tok_rows = []
+    logits_rows = []
     for prompt_idx, (hf, mcore) in enumerate(zip(hf_results, mcore_results)):
         assert hf.input_ids == mcore.input_ids
 
+        logits_stats = calculate_logits_stats(hf.logits, mcore.logits)
+        logits_rows.append(
+            {
+                "prompt_idx": prompt_idx,
+                "prompt": hf.prompt,
+                "input_ids": hf.input_ids,
+                **logits_stats,
+            }
+        )
         for tok_idx, input_id in enumerate(hf.input_ids):
             hf_topk = hf.topk_ids[tok_idx]
             mc_topk = hf.topk_ids[tok_idx]
             topk_matches = calculate_topk_stats(hf_topk, mc_topk)
-            rows.append(
+            per_tok_rows.append(
                 {
-                    "prompt": hf.prompt,
                     "prompt_idx": prompt_idx,
                     "token_idx": tok_idx,
                     "input_ids": hf.input_ids,
@@ -372,9 +386,9 @@ def build_comparison_df(
                     "mcore_topk_scores": mcore.topk_scores[tok_idx],
                 }
             )
-
-    df = pd.DataFrame(rows).set_index(["prompt_idx", "token_idx"])
-    return df
+    logits_df = pd.DataFrame(logits_rows).set_index(["prompt_idx"])
+    per_tok_df = pd.DataFrame(per_tok_rows).set_index(["prompt_idx", "token_idx"])
+    return logits_df, per_tok_df
 
 
 @torch.no_grad
@@ -394,7 +408,7 @@ def run_hf(model_path: str, data_iter: Iterator, topk: int):
                 topk_ids=topk_ids.tolist(),
                 topk_scores=topk_scores.tolist(),
                 input_ids=input_ids[0].tolist(),
-                prompt=d["prompt"]
+                prompt=d["prompt"],
             )
         )
 
@@ -463,6 +477,47 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
     return results
 
 
+def process_results(
+    hf_results: list[ModelCheckResult],
+    mcore_results: list[ModelCheckResult],
+    model_path: str,
+    save_dir: Path,
+):
+    logits_df, token_topk_df = postprocess_logits(hf_results, mcore_results)
+
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    tp_size = mpu.get_tensor_model_parallel_world_size()
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    etp_size = mpu.get_expert_tensor_parallel_world_size()
+
+    base_name = model_path.split("/")[-1] + "__" + f"pp{pp_size}tp{tp_size}ep{ep_size}etp{etp_size}"
+
+    def save_df(df: pd.DataFrame, label: str):
+        file_stem = base_name + "__" + label
+        save_path = (save_dir / file_stem).with_suffix(".csv").resolve().as_posix()
+        df.to_csv(save_path)
+        print(f"{label} df saved to {save_path}")
+
+    save_df(logits_df, "logits")
+    save_df(token_topk_df, "token_topk")
+
+    # Format for printing
+    pd.set_option("display.float_format", "{:.4f}".format)  # Set float precision
+    pd.set_option("display.max_columns", None)  # Display all columns
+
+    # Logits stats
+    print(logits_df)
+
+    # Topk stats
+    token_topk_df["hf_topk_scores"] = token_topk_df["hf_topk_scores"].apply(
+        lambda scores: [f"{x:.4f}" for x in scores]
+    )
+    token_topk_df["mcore_topk_scores"] = token_topk_df["mcore_topk_scores"].apply(
+        lambda scores: [f"{x:.4f}" for x in scores]
+    )
+    print(token_topk_df)
+
+
 def check_logits(
     mcore_model_parts: McoreModelT,
     model_path: str,
@@ -487,25 +542,16 @@ def check_logits(
 
     # PP comms, TODO: add VPP
     is_last_stage = mpu.is_pipeline_last_stage()
-    pp_size = mpu.get_pipeline_model_parallel_world_size()
 
     # TP comms
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_group_rank = dist.get_group_rank(tp_group, rank)
-    tp_size = mpu.get_tensor_model_parallel_world_size()
 
     # Expert comms
     ep_group = mpu.get_expert_model_parallel_group()
     ep_group_rank = dist.get_group_rank(ep_group, rank)
-    ep_size = mpu.get_expert_model_parallel_world_size()
-
     etp_group = mpu.get_expert_tensor_parallel_group()
     etp_group_rank = dist.get_group_rank(etp_group, rank)
-    etp_size = mpu.get_expert_tensor_parallel_world_size()
-
-    should_print = (
-        tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
-    )
 
     data_iter = iter(data_loader)
     hf_data, mcore_data = tee(data_iter, 2)
@@ -513,28 +559,16 @@ def check_logits(
     hf_results = run_hf(model_path, hf_data, topk)
     mcore_results = run_mc(mcore_model_parts, mcore_data, topk)
 
-    if should_print:
-        dist_print(f"{len(mcore_results)}")
-        df = build_comparison_df(hf_results, mcore_results)
+    # Only last pp stage has valid results, other conditions are to remove duplicate printing
+    should_post_process = (
+        is_last_stage and tp_group_rank == 0 and ep_group_rank == 0 and etp_group_rank == 0
+    )
 
-        file_stem = "-".join(
-            [model_path.split("/")[-1], f"pp{pp_size}tp{tp_size}ep{ep_size}etp{etp_size}"]
+    if should_post_process:
+        process_results(
+            hf_results, mcore_results, model_path=model_path, save_dir=args.logits_save_path
         )
-        save_path = (args.logits_save_path / file_stem).with_suffix(".csv").resolve().as_posix()
-        df.to_csv(save_path)
 
-        # Format for printing
-        pd.set_option("display.float_format", "{:.4f}".format)  # Set float precision
-        pd.set_option("display.max_columns", None)  # Display all columns
-        df["hf_topk_scores"] = df["hf_topk_scores"].apply(
-            lambda scores: [f"{x:.4f}" for x in scores]
-        )
-        df["mcore_topk_scores"] = df["mcore_topk_scores"].apply(
-            lambda scores: [f"{x:.4f}" for x in scores]
-        )
-        print(df)
-
-        print(f"Logits comparison saved to {save_path}")
     dist.barrier()
 
 
@@ -571,7 +605,7 @@ def main(args: Namespace):
     mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
     check_logits(mcore_model_parts, model_path=model_path, topk=args.topk)
-    
+
     if args.save_checkpoint:
         save_local_checkpoint(mcore_model_parts)
 
@@ -604,7 +638,9 @@ if __name__ == "__main__":
         default="logits_results",
         help="If checking logits, where to save results",
     )
-    parser.add_argument("--save-checkpoint", action="store_true", help="Store converted Megatron checkpoint")
+    parser.add_argument(
+        "--save-checkpoint", action="store_true", help="Store converted Megatron checkpoint"
+    )
     add_megatron_arguments(parser)
     args = parser.parse_args()
 
