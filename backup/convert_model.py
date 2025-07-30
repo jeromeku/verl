@@ -396,36 +396,26 @@ def run_hf(model_path: str, data_iter: Iterator, topk: int):
 def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
     rank = dist.get_rank()
 
-    is_pp = mpu.get_pipeline_model_parallel_world_size() > 1
     pp_group = mpu.get_pipeline_model_parallel_group()
-    pp_group_rank = dist.get_group_rank(pp_group, rank)
     is_last_stage = mpu.is_pipeline_last_stage()
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    tp_rank = mpu.get_tensor_model_parallel_rank()
     tp_group = mpu.get_tensor_model_parallel_group()
-    tp_group_rank = dist.get_group_rank(tp_group, rank)
-    ep_size = mpu.get_expert_model_parallel_world_size()
-    etp_size = mpu.get_expert_tensor_parallel_world_size()
-
-    pp_group_ranks = dist.get_process_group_ranks(pp_group)
-    tp_group_ranks = dist.get_process_group_ranks(tp_group)
-#    mp_group_ranks = dist.get_process_group_ranks(mp_group)
-
 
     forward_backward_func = get_forward_backward_func()
-    # data_iter = iter(dataset)
     results = []
     device = torch.cuda.current_device()
 
+    # Pass single batch, single sample at a time to avoid having to deal with variable seqlen
     for d in data_iter:
         input_ids = d["input_ids"]
         prompt_len = len(input_ids[0])
+
         if rank == 0:
             print(f"Processing prompt {input_ids=}, {prompt_len=}")
 
         outputs = forward_backward_func(
             forward_step_func=partial(forward_step_func, device=device),
-            data_iterator=iter([d]),  # siter(dataset),
+            data_iterator=iter([d]),
             model=mcore_model_parts,
             num_microbatches=1,
             seq_length=prompt_len,
@@ -438,7 +428,10 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
         if is_last_stage:
             logits = outputs[0]["logits"][0]
 
+        # When using pp, only last pp stage produces logits
+        # When using tp, outputs are parallel, split across vocab dim (1)
         if tp_size > 1 and is_last_stage:
+            # all_gather only supports gather_dim=0 => transpose -> gather -> transpose
             output_shape = (logits.shape[1] * tp_size, logits.shape[0])
             full_logits = torch.zeros(*output_shape, device=logits.device, dtype=logits.dtype)
             dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
@@ -470,28 +463,39 @@ def check_logits(
     data_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     rank = dist.get_rank()
+    
+    # PP comms, TODO: add VPP
     is_last_stage = mpu.is_pipeline_last_stage()
+    pp_size = mpu.get_pipeline_model_parallel_world_size()
+    
+    # TP comms
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_group_rank = dist.get_group_rank(tp_group, rank)
-    ep_group = mpu.get_expert_model_parallel_group()
-    etp_group = mpu.get_expert_tensor_parallel_group()
-    ep_group_rank = dist.get_group_rank(ep_group, rank)
-    etp_group_rank = dist.get_group_rank(etp_group, rank)
+    tp_size = mpu.get_tensor_model_parallel_world_size()
     
-    should_print = tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
+    # Expert comms
+    ep_group = mpu.get_expert_model_parallel_group()
+    ep_group_rank = dist.get_group_rank(ep_group, rank)
+    ep_size = mpu.get_expert_model_parallel_world_size()
+    
+    etp_group = mpu.get_expert_tensor_parallel_group()
+    etp_group_rank = dist.get_group_rank(etp_group, rank)
+    etp_size = mpu.get_expert_tensor_parallel_world_size()
 
+    should_print = tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
+    
     data_iter = iter(data_loader)
     hf_data, mcore_data = tee(data_iter, 2)
     
     hf_results = run_hf(model_path, hf_data, topk)    
     mcore_results = run_mc(mcore_model_parts, mcore_data, topk)
     
-    if should_print: #ep_group_rank == 0 and tp_group_rank == 0 and is_last_stage:
+    if should_print:
         dist_print(f"{len(mcore_results)}")
         df = build_comparison_df(hf_results, mcore_results)
         print(df)
-        file_stem = Path(model_path.split("/")[-1]).with_suffix(".csv")
-        save_path = (args.logits_save_path / file_stem).resolve().as_posix()
+        file_stem = "-".join([model_path.split("/")[-1], f"pp{pp_size}tp{tp_size}ep{ep_size}etp{etp_size}"])
+        save_path = (args.logits_save_path / file_stem).with_suffix(".csv").resolve().as_posix()
         df.to_csv(save_path)
         print(f"Logits comparison save to {save_path}")
     dist.barrier()

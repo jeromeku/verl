@@ -6,10 +6,10 @@ QWEN3_MOE="assets/qwen3_moe_4layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/
 
 MODEL_ID="${QWEN3_MOE}"
 
-TP=1
+TP=2
 PP=1
 CP=1
-EP=1
+EP=2
 ETP=1
 VPP_SIZE=None
 
