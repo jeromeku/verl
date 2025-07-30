@@ -493,10 +493,18 @@ def check_logits(
     if should_print:
         dist_print(f"{len(mcore_results)}")
         df = build_comparison_df(hf_results, mcore_results)
-        print(df)
+        
         file_stem = "-".join([model_path.split("/")[-1], f"pp{pp_size}tp{tp_size}ep{ep_size}etp{etp_size}"])
         save_path = (args.logits_save_path / file_stem).with_suffix(".csv").resolve().as_posix()
         df.to_csv(save_path)
+
+        # Format for printing
+        pd.set_option('display.float_format', '{:.4f}'.format)  # Set float precision
+        pd.set_option('display.max_columns', None)  # Display all columns
+        df["hf_topk_scores"] = df["hf_topk_scores"].apply(lambda scores: [f"{x:.4f}" for x in scores]) 
+        df["mcore_topk_scores"] = df["mcore_topk_scores"].apply(lambda scores: [f"{x:.4f}" for x in scores]) 
+        print(df)
+
         print(f"Logits comparison save to {save_path}")
     dist.barrier()
 
@@ -516,12 +524,9 @@ def main(args: Namespace):
 
     parallel_config = ParallelismConfig.from_args(args, sequence_parallel=sequence_parallel)
 
-    moe_opt_config = MoeOptConfig.from_args(args) if is_moe else None
-
     qwen_config = Qwen3MCoreConfig.from_hf(
         hf_config,
         parallelism_config=parallel_config,
-        # moe_opt_config=moe_opt_config,
         perform_initialization=args.perform_initialization,
         use_cpu_initialization=args.use_cpu_initialization,
         init_model_with_meta_device=args.init_model_with_meta_device,
@@ -536,7 +541,7 @@ def main(args: Namespace):
 
     mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
-    check_logits(mcore_model_parts, model_path=model_path)
+    check_logits(mcore_model_parts, model_path=model_path, topk=args.topk)
     # save_local_checkpoint(mcore_model_parts)
 
 
@@ -559,6 +564,7 @@ if __name__ == "__main__":
         help="Enable finetune by default in order to disable initialization of weights and structs needed only for pretraining",
     )
     parser.add_argument("--check-logits", action="store_true")
+    parser.add_argument("--topk", type=int, default=10, help="topk logits / token ids when comparing model outputs")
     parser.add_argument("--logits-save-path", type=Path, default="logits_results", help="If checking logits, where to save results")
 
     add_megatron_arguments(parser)
