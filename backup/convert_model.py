@@ -1,58 +1,60 @@
 # ruff: noqa E402
+import gc
+import os
 import sys
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
+from collections import Counter
+from dataclasses import dataclass
+from functools import partial
+from itertools import tee
 from pathlib import Path
 from pprint import pprint
 from typing import Iterator
-from itertools import tee
-import os
+
 import megatron.core as mc
+import numpy as np
+import pandas as pd
+import torch
+import torch.distributed as dist
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers.models.qwen3 import Qwen3ForCausalLM
+from transformers.models.qwen3_moe import Qwen3MoeForCausalLM
+from transformers.utils.logging import disable_progress_bar
 
 # Need include megatron root to resolve modules outside of megatron.core
 MEGATRON_ROOT = Path(mc.__file__).parents[2]
 sys.path.append(MEGATRON_ROOT.resolve().as_posix())
 
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
-
-from megatron.training.arguments import add_megatron_arguments, validate_args
-from megatron.training.global_vars import set_global_variables, get_args
-from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.transformer import TransformerConfig
-from megatron.training.utils import unwrap_model
 from megatron.core import mpu
-
-from transformers import AutoConfig
-from transformers.models.qwen3 import Qwen3ForCausalLM
-from transformers.models.qwen3_moe import Qwen3MoeForCausalLM
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers.utils.logging import disable_progress_bar
-
-import torch.distributed as dist
-import torch
-
-from torch.utils.data import Dataset, DataLoader
-from collections import Counter
+from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+from megatron.core.transformer import TransformerConfig
+from megatron.training.arguments import add_megatron_arguments, validate_args
+from megatron.training.global_vars import get_args, set_global_variables
+from megatron.training.utils import unwrap_model
+from qwen3_configuration import (
+    QWEN3_MODELS,
+    QWEN3_MOE_MODELS,
+    MoeOptConfig,
+    ParallelismConfig,
+    Qwen3ConfigT,
+    Qwen3MCoreConfig,
+    Qwen3ModelT,
+    is_qwen3_moe_config,
+)
+from debugging import get_model_param_devices, get_module_param_count, get_total_params
 from mcore_utils import (
+    McoreModelT,
+    dist_print,
+    get_model,
+    get_model_provider_func,
     init_distributed,
     init_mpu,
     patch_mcore_args,
-    dist_print,
-    get_model_provider_func,
-    get_model,
-    McoreModelT,
 )
-from qwen3_configuration import (
-    QWEN3_MOE_MODELS,
-    Qwen3MCoreConfig,
-    Qwen3ConfigT,
-    MoeOptConfig,
-    ParallelismConfig,
-    Qwen3ModelT,
-    is_qwen3_moe_config,
-    QWEN3_MODELS,
-)
-from debugging import get_model_param_devices, get_total_params, get_module_param_count
-from weight_conversion import remap_param_names_for_ep_pp, map_mcore_hf_param_names, ShardLoader
+from weight_conversion import ShardLoader, map_mcore_hf_param_names, remap_param_names_for_ep_pp
 
 
 def init_megatron(args, seed: int = 1234):
@@ -225,8 +227,8 @@ def convert_hf_to_mcore(
 
 
 def save_local_checkpoint(mcore_model_parts: McoreModelT, iteration: int = 1, flops_count: int = 0):
-    from megatron.training.checkpointing import save_checkpoint
     from megatron.core import mpu
+    from megatron.training.checkpointing import save_checkpoint
 
     pp_rank = mpu.get_pipeline_model_parallel_rank()
     vpp_rank = mpu.get_virtual_pipeline_model_parallel_rank()
@@ -266,9 +268,6 @@ def forward_step_func(data_iterator, model, device: str):
 
         return {"logits": logits}
 
-    # input_ids, position_ids, attention_mask = next(data_iterator)
-    #    output_tensor = model(input_ids.to(device), position_ids.to(device), attention_mask.to(device))
-
     inputs = next(data_iterator)
     input_ids = inputs["input_ids"].to(device)
     position_ids = inputs["position_ids"].to(device)
@@ -280,7 +279,7 @@ def forward_step_func(data_iterator, model, device: str):
 
 
 def get_test_prompts() -> list[str]:
-    # Only include prompts with even number of tokens
+    # Only include prompts that decode to an even number of tokens (needed for sequence parallelism)
     return [
         # "The capital of France is",
         # "Machine learning is",
@@ -311,19 +310,11 @@ class PromptDataset(Dataset):
         position_ids = torch.arange(input_ids.shape[0], dtype=torch.long)
 
         return {
+            "prompt": prompt,
             "input_ids": input_ids,
             "position_ids": position_ids,
             "attention_mask": attention_mask,
         }
-
-
-import numpy as np
-from dataclasses import dataclass
-import pandas as pd
-import gc
-from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
-from functools import partial
-from itertools import tee
 
 
 @dataclass
@@ -343,20 +334,21 @@ def build_comparison_df(
         raise ValueError("Result lists must be the same length (one per prompt).")
 
     rows = []
-    for prompt_idx, (res1, res2) in enumerate(zip(hf_results, mcore_results)):
-        assert res1.input_ids == res2.input_ids
+    for prompt_idx, (hf, mcore) in enumerate(zip(hf_results, mcore_results)):
+        assert hf.input_ids == mcore.input_ids
 
-        for tok_idx, input_id in enumerate(res1.input_ids):
+        for tok_idx, input_id in enumerate(hf.input_ids):
             rows.append(
                 {
+                    "prompt": hf.prompt,
                     "prompt_idx": prompt_idx,
                     "token_idx": tok_idx,
-                    "input_ids": res1.input_ids,
+                    "input_ids": hf.input_ids,
                     "token_id": input_id,
-                    "hf_topk_ids": res1.topk_ids[tok_idx],
-                    "mcore_topk_ids": res2.topk_ids[tok_idx],
-                    "hf_topk_scores": res1.topk_scores[tok_idx],
-                    "mcore_topk_scores": res2.topk_scores[tok_idx],
+                    "hf_topk_ids": hf.topk_ids[tok_idx],
+                    "mcore_topk_ids": mcore.topk_ids[tok_idx],
+                    "hf_topk_scores": hf.topk_scores[tok_idx],
+                    "mcore_topk_scores": mcore.topk_scores[tok_idx],
                 }
             )
 
@@ -367,9 +359,7 @@ def build_comparison_df(
 @torch.no_grad
 def run_hf(model_path: str, data_iter: Iterator, topk: int):
     device = torch.cuda.current_device()
-    hf_model = AutoModelForCausalLM.from_pretrained(
-        model_path, device_map=device
-    )
+    hf_model = AutoModelForCausalLM.from_pretrained(model_path, device_map=device)
 
     results = []
     for d in data_iter:
@@ -383,6 +373,7 @@ def run_hf(model_path: str, data_iter: Iterator, topk: int):
                 topk_ids=topk_ids.tolist(),
                 topk_scores=topk_scores.tolist(),
                 input_ids=input_ids[0].tolist(),
+                prompt=d["prompt"]
             )
         )
 
@@ -391,6 +382,7 @@ def run_hf(model_path: str, data_iter: Iterator, topk: int):
     gc.collect()
 
     return results
+
 
 @torch.no_grad
 def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
@@ -436,11 +428,19 @@ def run_mc(mcore_model_parts: McoreModelT, data_iter: Iterator, topk: int):
             full_logits = torch.zeros(*output_shape, device=logits.device, dtype=logits.dtype)
             dist.all_gather_into_tensor(full_logits, logits.T.contiguous(), group=tp_group)
             logits = full_logits.T
-        
+
         topk_scores, topk_ids = logits.topk(topk, dim=-1)
-        results.append(ModelCheckResult(logits=logits.cpu().numpy(), input_ids=input_ids[0].tolist(), topk_scores=topk_scores.tolist(), topk_ids=topk_ids.tolist()))    
+        results.append(
+            ModelCheckResult(
+                logits=logits.cpu().numpy(),
+                input_ids=input_ids[0].tolist(),
+                topk_scores=topk_scores.tolist(),
+                topk_ids=topk_ids.tolist(),
+            )
+        )
 
     return results
+
 
 def check_logits(
     mcore_model_parts: McoreModelT,
@@ -463,46 +463,54 @@ def check_logits(
     data_loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     rank = dist.get_rank()
-    
+
     # PP comms, TODO: add VPP
     is_last_stage = mpu.is_pipeline_last_stage()
     pp_size = mpu.get_pipeline_model_parallel_world_size()
-    
+
     # TP comms
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_group_rank = dist.get_group_rank(tp_group, rank)
     tp_size = mpu.get_tensor_model_parallel_world_size()
-    
+
     # Expert comms
     ep_group = mpu.get_expert_model_parallel_group()
     ep_group_rank = dist.get_group_rank(ep_group, rank)
     ep_size = mpu.get_expert_model_parallel_world_size()
-    
+
     etp_group = mpu.get_expert_tensor_parallel_group()
     etp_group_rank = dist.get_group_rank(etp_group, rank)
     etp_size = mpu.get_expert_tensor_parallel_world_size()
 
-    should_print = tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
-    
+    should_print = (
+        tp_group_rank == 0 and is_last_stage and ep_group_rank == 0 and etp_group_rank == 0
+    )
+
     data_iter = iter(data_loader)
     hf_data, mcore_data = tee(data_iter, 2)
-    
-    hf_results = run_hf(model_path, hf_data, topk)    
+
+    hf_results = run_hf(model_path, hf_data, topk)
     mcore_results = run_mc(mcore_model_parts, mcore_data, topk)
-    
+
     if should_print:
         dist_print(f"{len(mcore_results)}")
         df = build_comparison_df(hf_results, mcore_results)
-        
-        file_stem = "-".join([model_path.split("/")[-1], f"pp{pp_size}tp{tp_size}ep{ep_size}etp{etp_size}"])
+
+        file_stem = "-".join(
+            [model_path.split("/")[-1], f"pp{pp_size}tp{tp_size}ep{ep_size}etp{etp_size}"]
+        )
         save_path = (args.logits_save_path / file_stem).with_suffix(".csv").resolve().as_posix()
         df.to_csv(save_path)
 
         # Format for printing
-        pd.set_option('display.float_format', '{:.4f}'.format)  # Set float precision
-        pd.set_option('display.max_columns', None)  # Display all columns
-        df["hf_topk_scores"] = df["hf_topk_scores"].apply(lambda scores: [f"{x:.4f}" for x in scores]) 
-        df["mcore_topk_scores"] = df["mcore_topk_scores"].apply(lambda scores: [f"{x:.4f}" for x in scores]) 
+        pd.set_option("display.float_format", "{:.4f}".format)  # Set float precision
+        pd.set_option("display.max_columns", None)  # Display all columns
+        df["hf_topk_scores"] = df["hf_topk_scores"].apply(
+            lambda scores: [f"{x:.4f}" for x in scores]
+        )
+        df["mcore_topk_scores"] = df["mcore_topk_scores"].apply(
+            lambda scores: [f"{x:.4f}" for x in scores]
+        )
         print(df)
 
         print(f"Logits comparison saved to {save_path}")
@@ -542,7 +550,9 @@ def main(args: Namespace):
     mcore_config, mcore_model_parts = convert_hf_to_mcore(qwen_config, model_path)
 
     check_logits(mcore_model_parts, model_path=model_path, topk=args.topk)
-    save_local_checkpoint(mcore_model_parts)
+    
+    if args.save_checkpoint:
+        save_local_checkpoint(mcore_model_parts)
 
 
 if __name__ == "__main__":
@@ -564,9 +574,16 @@ if __name__ == "__main__":
         help="Enable finetune by default in order to disable initialization of weights and structs needed only for pretraining",
     )
     parser.add_argument("--check-logits", action="store_true")
-    parser.add_argument("--topk", type=int, default=10, help="topk logits / token ids when comparing model outputs")
-    parser.add_argument("--logits-save-path", type=Path, default="logits_results", help="If checking logits, where to save results")
-
+    parser.add_argument(
+        "--topk", type=int, default=10, help="topk logits / token ids when comparing model outputs"
+    )
+    parser.add_argument(
+        "--logits-save-path",
+        type=Path,
+        default="logits_results",
+        help="If checking logits, where to save results",
+    )
+    parser.add_argument("--save-checkpoint", action="store_true", help="Store converted Megatron checkpoint")
     add_megatron_arguments(parser)
     args = parser.parse_args()
 
