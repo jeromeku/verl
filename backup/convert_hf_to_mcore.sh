@@ -1,20 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
+# Config options
+
+# Model ID
 QWEN3_DENSE="Qwen/Qwen3-0.6B"
 QWEN3_MOE="assets/qwen3_moe_4layer_16experts" #"assets/qwen3_moe_4layer" #"Qwen/Qwen3-30B-A3B"
 
 MODEL_ID="${QWEN3_MOE}"
 
+# Parallelism Config
 TP=2
 PP=2
 CP=1
 EP=2
-ETP=1 # Explicitly set ETP to 1, otherwise Megatron will default this to TP size
+ETP=1 # Explicitly set ETP to 1, otherwise Megatron will default to TP size
 VPP_SIZE=None
 
 # See Megatron parallel_state initialization logic for how they implement MoE parallel folding
-# Parallel folding ~ separate parallel groups for MoE / non-MoE layers: MoE layers uses EP / ETP while non-MoE uses TP / CP 
+# TLDR: parallel folding ~ separate parallel groups for MoE / non-MoE layers: MoE layers uses EP / ETP process groups while non-MoE uses TP / CP process groups 
 WORLD_SIZE_NON_MOE=$((TP * CP * PP))
 WORLD_SIZE_MOE=$((EP * ETP * PP))
 
@@ -24,6 +28,8 @@ else
     WORLD_SIZE=${WORLD_SIZE_MOE}
 fi
 
+# Distributed launch
+# Use fake for debugging -- can't run any comms when using fake
 BACKEND="nccl"
 DIST_LAUNCH="torchrun --nproc-per-node ${WORLD_SIZE}"
 LOCAL_LAUNCH="python"
@@ -35,15 +41,20 @@ else
     LAUNCHER=${DIST_LAUNCH}
 fi
 
-
+# Model init
 INIT_META="--init-model-with-meta-device"
 INIT_CPU="--use-cpu-initialization"
-INIT_CUDA="cuda"
-
 INIT_METHOD=${INIT_META}
 
+# Checkpoint saving
+SAVE_CHECKPOINT=0
 SAVE_DIR="mcore_chkpts"
-CKPT_FORMAT="torch" # torch_dist
+CKPT_FORMAT="torch" 
+
+# Logits checking
+CHECK_LOGITS=1
+LOGITS_SAVE_PATH="logits_check"
+TOPK=5
 
 mkdir -p ${SAVE_DIR}
 
