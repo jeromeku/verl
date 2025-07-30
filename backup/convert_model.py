@@ -325,6 +325,23 @@ class ModelCheckResult:
     topk_scores: list[float]
     prompt: str = None
 
+def calculate_logits_stats(hf_logits: np.array, mcore_logits: np.array):
+    logit_diff = torch.abs(hf_logits - mcore_logits)
+    max_diff = logit_diff.max().item()
+    avg_diff = logit_diff.mean().item()
+    relative_diff = (logit_diff / (torch.abs(hf_logits) + 1e-8)).mean().item() * 100
+
+    return {"max_diff": max_diff, "avg_diff": avg_diff, "rel_diff": relative_diff }
+
+def calculate_topk_stats(hf_topk_ids: list[int], mcore_topk_ids: list[int], topk_ranks: list[int] = [1, 3, 5]):
+    matches = {}
+    topk_ranks = [k for k in topk_ranks if k <= len(hf_topk_ids)]
+    for k in topk_ranks:
+        ref = set(hf_topk_ids[:k])
+        test = set(mcore_topk_ids[:k])
+        matches[f"pass@{k}"] = True if ref == test else False
+
+    return matches
 
 def build_comparison_df(
     hf_results: list[ModelCheckResult],
@@ -338,6 +355,9 @@ def build_comparison_df(
         assert hf.input_ids == mcore.input_ids
 
         for tok_idx, input_id in enumerate(hf.input_ids):
+            hf_topk = hf.topk_ids[tok_idx]
+            mc_topk = hf.topk_ids[tok_idx]
+            topk_matches = calculate_topk_stats(hf_topk, mc_topk)
             rows.append(
                 {
                     "prompt": hf.prompt,
@@ -347,6 +367,7 @@ def build_comparison_df(
                     "token_id": input_id,
                     "hf_topk_ids": hf.topk_ids[tok_idx],
                     "mcore_topk_ids": mcore.topk_ids[tok_idx],
+                    **topk_matches,
                     "hf_topk_scores": hf.topk_scores[tok_idx],
                     "mcore_topk_scores": mcore.topk_scores[tok_idx],
                 }
